@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Reasonix Kernel - Python Micro-code Representation
+Harness Kernel - Python Micro-code Representation
 
 Changes from v1:
   - All config loaded from YAML (Pydantic models)
@@ -240,13 +240,17 @@ _LOG_STYLES = {
 }
 
 
-def log_box(category: str, text: str, max_width: int = 90) -> None:
-    """Print text in a left-bordered box with category label."""
+def log_box(category: str, text: str, max_width: int = 0) -> None:
+    """Print text in a left-bordered box with category label.
+
+    max_width=0 (default) means no per-line truncation.
+    """
     style = _LOG_STYLES.get(category, (category.upper(), "│"))
     label, bar = style
     lines = text.splitlines() or [""]
-    # truncate long lines
-    lines = [l[:max_width] for l in lines]
+    # truncate long lines only when a positive limit is requested
+    if max_width > 0:
+        lines = [l[:max_width] for l in lines]
     width = max(len(label) + 2, max(len(l) for l in lines) + 2, 40)
     top = f"┌─ {label} {'─' * (width - len(label) - 3)}"
     bot = f"└{'─' * (width)}"
@@ -513,7 +517,7 @@ class WebFetchTool(Tool):
         try:
             import urllib.request
 
-            req = urllib.request.Request(args["url"], headers={"User-Agent": "Reasonix/1.0"})
+            req = urllib.request.Request(args["url"], headers={"User-Agent": "Harness/1.0"})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return resp.read().decode("utf-8", errors="replace")
         except Exception as e:
@@ -572,7 +576,7 @@ class TodoWriteTool(Tool):
 # PlanModeMarker is prepended to every user turn while plan mode is on.
 # It rides in the user message (not the system prompt), so the cache-stable
 # prompt prefix is untouched and the toggle costs nothing in cache hits.
-# Mirrors DeepSeek-Reasonix internal/control/input.go : PlanModeMarker.
+# Mirrors DeepSeek-Harness internal/control/input.go : PlanModeMarker.
 PLAN_MODE_MARKER = (
     "[Plan mode \u2014 read-only. Explore the codebase first "
     "(read_file, ls, grep, glob, web_fetch, ask are available; "
@@ -591,7 +595,7 @@ PLAN_MODE_MARKER = (
 )
 
 # Injected as the follow-up user turn once the user approves a plan.
-# Mirrors DeepSeek-Reasonix planApprovedMessage in controller.go.
+# Mirrors DeepSeek-Harness planApprovedMessage in controller.go.
 PLAN_APPROVED_MESSAGE = (
     "Plan approved \u2014 plan mode is off; you\u2019re cleared to make the changes "
     "without asking again. Implement the plan now. Use this serial workflow: "
@@ -606,7 +610,7 @@ PLAN_APPROVED_MESSAGE = (
 def parse_plan_todos(plan: str) -> List[dict]:
     """Extract a starter task list from an approved plan's markdown list items.
 
-    Mirrors DeepSeek-Reasonix parsePlanTodos (internal/control/controller.go).
+    Mirrors DeepSeek-Harness parsePlanTodos (internal/control/controller.go).
     First item gets status='in_progress'; the rest 'pending'. Capped at 20.
     """
     import re
@@ -645,7 +649,7 @@ class Registry:
     def __init__(self):
         self._tools: Dict[str, Tool] = {}
         # When True, writer tools are blocked (plan-mode gate).
-        # Mirrors Reasonix executor.SetPlanMode.
+        # Mirrors Harness executor.SetPlanMode.
         self.plan_mode: bool = False
 
     def add(self, tool: Tool) -> None:
@@ -659,7 +663,7 @@ class Registry:
 
     def schemas(self) -> List[dict]:
         """Return tool schemas. In plan mode, omit writer tools so the model
-        never sees them in its call list (mirrors Reasonix executor gate)."""
+        never sees them in its call list (mirrors Harness executor gate)."""
         if self.plan_mode:
             return [t.to_dict() for t in self._tools.values() if t.read_only()]
         return [t.to_dict() for t in self._tools.values()]
@@ -866,15 +870,7 @@ class Provider:
             _cancel.set()  # 通知子线程停止重试
             executor.shutdown(wait=False)
             raise  # 向上传播，由 Controller / CLI 层处理
-        finally:
-            executor.shutdown(wait=False)
-
-        # 解析正常响应
-        try:
-            choice = result["choices"][0]
-            msg = choice["message"]
-            return {"content": msg.get("content", ""), "tool_calls": msg.get("tool_calls", []), "finish_reason": choice.get("finish_reason", "")}
-        except (urllib.error.HTTPError,) as e:
+        except urllib.error.HTTPError as e:
             body = ""
             try:
                 body = e.read().decode("utf-8", errors="replace")
@@ -884,6 +880,16 @@ class Provider:
             if body:
                 err_msg += f"\n{body}"
             return {"content": err_msg, "tool_calls": [], "finish_reason": "error"}
+        except (urllib.error.URLError, OSError, Exception) as e:
+            return {"content": f"Error: {e}", "tool_calls": [], "finish_reason": "error"}
+        finally:
+            executor.shutdown(wait=False)
+
+        # 解析正常响应
+        try:
+            choice = result["choices"][0]
+            msg = choice["message"]
+            return {"content": msg.get("content", ""), "tool_calls": msg.get("tool_calls", []), "finish_reason": choice.get("finish_reason", "")}
         except Exception as e:
             return {"content": f"Error: {e}", "tool_calls": [], "finish_reason": "error"}
 
@@ -903,7 +909,7 @@ class Controller:
         self.step_count = 0
         # Plan-mode state: when True, PlanModeMarker is prepended to outgoing
         # turns and writer tools are blocked via registry.plan_mode.
-        # Mirrors Reasonix Controller.planMode / SetPlanMode.
+        # Mirrors Harness Controller.planMode / SetPlanMode.
         self._plan_mode: bool = False
 
     def set_plan_mode(self, on: bool) -> None:
@@ -996,7 +1002,7 @@ class Controller:
     def _compose(self, text: str) -> str:
         """Prepend PlanModeMarker when plan mode is active.
 
-        Mirrors Reasonix control.Controller.Compose: the marker rides the user
+        Mirrors Harness control.Controller.Compose: the marker rides the user
         message so the cache-stable system prefix is never modified.
         """
         if self._plan_mode:
@@ -1006,7 +1012,7 @@ class Controller:
     def _request_plan_approval(self, proposal: str) -> bool:
         """Show the plan proposal and ask the user to approve or reject.
 
-        Returns True on approval. Mirrors Reasonix requestApproval called with
+        Returns True on approval. Mirrors Harness requestApproval called with
         planApprovalTool after a plan-mode turn finishes.
         """
         print("\n" + "\u2550" * 60)
@@ -1079,7 +1085,7 @@ class Controller:
                     # execute_gated blocks writers when plan_mode is on.
                     result = self.registry.execute_gated(tname, self.context, args)
                     self.context.add_tool_result(tname, tid, result)
-                    call_str = f"call: {tname}\nargs: {json.dumps(args, ensure_ascii=False)[:1024]}"
+                    call_str = f"call: {tname}\nargs: {json.dumps(args, ensure_ascii=False)}"
                     res_str = f"result:\n{result[:600]}"
                     log_box("tool", f"{call_str}\n{'\u2500' * 36}\n{res_str}")
             else:
@@ -1091,7 +1097,7 @@ class Controller:
     def run(self, user_request: str) -> str:
         """Run a user request, honouring plan mode.
 
-        Plan-mode flow (mirrors Reasonix runTurnWithRawDisplay):
+        Plan-mode flow (mirrors Harness runTurnWithRawDisplay):
           1. Prepend PlanModeMarker and run a read-only research/planning turn.
           2. Present the proposal to the user for approval.
           3a. Approved  -> exit plan mode, seed todos, run execution turn.
@@ -1202,13 +1208,30 @@ def _read_input_auto(timeout: float = 0.08) -> str:
     return "\n".join(lines)
 
 
+COMMANDS_HELP = """
+┌────────────────────────────────────────────────────────────────────────────────
+│  Harness 命令帮助
+├────────────────────────────────────────────────────────────────────────────────
+│  /new                   — 开始新对话（自动保存当前会话）
+│  /clear                 — 同 /new，清空当前对话上下文
+│  /model                 — 列出所有可用 provider
+│  /model <名称或编号>       — 切换到指定 provider（支持名称或列表序号）
+│  /plan                  — 开启 plan 模式（下一条请求会先规划，再等待确认后执行）
+│  /plan on               — 开启 plan 模式
+│  /plan off              — 关闭 plan 模式（解除写入封锁）
+│  /plan status           — 查看 plan 模式当前状态
+│  Ctrl-C                 — 取消当前请求（保留上下文）
+│  Ctrl-D / EOF           — 退出（自动保存会话）
+└────────────────────────────────────────────────────────────────────────────────
+"""
+
+
 def main(argv=None) -> None:
     import argparse
 
-    # 从项目根目录的 .env 文件补充环境变量（如果尚未通过系统环境变量注入）
     _load_dotenv()
 
-    parser = argparse.ArgumentParser(description="Reasonix Kernel (Python)")
+    parser = argparse.ArgumentParser(description="Harness Kernel (Python)")
     parser.add_argument("--root", default=".", help="Workspace root")
     parser.add_argument("--model", default="", help="Override default model")
     parser.add_argument("--resume", default="", help="Resume session ID")
@@ -1224,6 +1247,8 @@ def main(argv=None) -> None:
             default = next((p for p in ctrl.cfg.providers if p.default), ctrl.cfg.providers[0])
             ctrl.provider = Provider(default)
             log_box("boot", f"Resumed session: {args.resume}\nWorkspace: {ctrl.root}\nMessages: {len(ctrl.context.messages)}")
+            if not args.request:
+                print(COMMANDS_HELP)
         else:
             print(f"Session '{args.resume}' not found. Starting fresh.")
             ctrl.boot()
@@ -1233,7 +1258,7 @@ def main(argv=None) -> None:
     if args.request:
         print(f"\n=== Result ===\n{ctrl.run(args.request)}")
     else:
-        print("Reasonix ready. Enter requests (Ctrl-D to exit). Commands: /new, /model, /plan [on|off]")
+        print(COMMANDS_HELP)
         while True:
             try:
                 req = _read_input_auto()
@@ -1246,7 +1271,10 @@ def main(argv=None) -> None:
             req = req.strip()
             if not req:
                 continue
-            if req == "/new":
+            if req in ("/help", "?"):
+                print(COMMANDS_HELP)
+                continue
+            if req in ("/new", "/clear"):
                 sid = ctrl.save_session()
                 ctrl.reset_context()
                 print(f"New context started. Previous session: --resume {sid}")
@@ -1258,13 +1286,6 @@ def main(argv=None) -> None:
                 else:
                     print(ctrl.switch_provider(parts[1]))
                 continue
-            # /plan command: toggle plan mode on/off, or show current status.
-            # Usage:
-            #   /plan        -> enter plan mode (next request will be planned first)
-            #   /plan on     -> enter plan mode
-            #   /plan off    -> exit plan mode
-            #   /plan status -> show current plan-mode state
-            # Mirrors Reasonix slash.go autoPlanArgItems + controller SetPlanMode.
             if req == "/plan" or req.startswith("/plan "):
                 parts = req.split(None, 1)
                 sub = parts[1].strip().lower() if len(parts) > 1 else "on"
@@ -1304,7 +1325,6 @@ SkillEntry.model_rebuild()
 if __name__ == "__main__":
     import sys
 
-    # 启动时从 .env 文件补充环境变量（不覆盖已有的系统环境变量）
     _load_dotenv()
 
     if "ipykernel" not in sys.argv[0]:
