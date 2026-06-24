@@ -42,7 +42,7 @@ providers:
     context_window: 65536
     request_timeout: 120
     retry_time: 3
-    delay: 0.3
+    delay: 1
 
 # Agent 行为配置
 agent:
