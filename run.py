@@ -7,6 +7,7 @@ Changes from v1:
   - All config loaded from YAML (Pydantic models)
   - Skills are configurable via YAML, not hardcoded
   - Significant code simplification
+  - PermissionManager integrated directly
 
 Usage Example:
   # Simple query
@@ -236,6 +237,7 @@ def _stdout(msg: str):
     sys.stdout.write(msg + "\n")
     sys.stdout.flush()
 
+
 # =============================================================================
 # Logging helpers
 # =============================================================================
@@ -342,6 +344,8 @@ class WriteFileTool(Tool):
         return False
 
     def execute(self, ctx, args):
+        if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
+            return "Error: Permission denied by user."
         path = Path(args["path"])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(args["content"], encoding="utf-8")
@@ -362,6 +366,8 @@ class EditFileTool(Tool):
         return False
 
     def execute(self, ctx, args):
+        if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
+            return "Error: Permission denied by user."
         path = Path(args["path"])
         content = path.read_text(encoding="utf-8")
         old = args["old_text"]
@@ -385,6 +391,8 @@ class MultiEditTool(Tool):
         return False
 
     def execute(self, ctx, args):
+        if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
+            return "Error: Permission denied by user."
         path = Path(args["path"])
         content = path.read_text(encoding="utf-8")
         for edit in args["edits"]:
@@ -566,10 +574,11 @@ class TodoWriteTool(Tool):
         return False
 
     def execute(self, ctx, args):
-        if hasattr(ctx, "todos"):
-            ctx.todos = args["todos"]
+        target = ctx.context if hasattr(ctx, "context") else ctx
+        if hasattr(target, "todos"):
+            target.todos = args["todos"]
             # Visual feedback for task progress in terminal
-            todo_display = "\n".join([f"  [{t['status']:<11}] {t['content']}" for t in args['todos']])
+            todo_display = "\n".join([f"  [{t['status']:<11}] {t['content']}" for t in args["todos"]])
             _stdout(f"\n\U0001f4dd TASK PROGRESS:\n{todo_display}\n")
         return f"Updated {len(args['todos'])} todos"
 
@@ -647,7 +656,70 @@ def parse_plan_todos(plan: str) -> List[dict]:
 
 
 # =============================================================================
-# 3. Tool Registry
+# 3. Permission Manager
+# =============================================================================
+
+
+class PermissionManager:
+    """Manages file-level write permissions with interactive approval."""
+
+    def __init__(self, storage_file: str = ".permissions.json"):
+        self.storage_file = Path(storage_file)
+        self.data = self._load()
+
+    def _load(self) -> dict:
+        if self.storage_file.exists():
+            with open(self.storage_file, "r") as f:
+                return json.load(f)
+        return {"granted": {}}
+
+    def _save(self) -> None:
+        with open(self.storage_file, "w") as f:
+            json.dump(self.data, f, indent=2)
+
+    def check_permission(self, file_path: str) -> Optional[str]:
+        path = Path(file_path).resolve()
+        if str(path) in self.data["granted"]:
+            return self.data["granted"][str(path)]
+        for parent in path.parents:
+            if str(parent) in self.data["granted"]:
+                return self.data["granted"][str(parent)]
+        return None
+
+    def grant(self, path: str, scope: str) -> None:
+        resolved = Path(path).resolve()
+        if scope == "dir":
+            p = resolved if resolved.is_dir() else resolved.parent
+            self.data["granted"][str(p)] = "all_in_dir"
+        else:
+            self.data["granted"][str(resolved)] = "file"
+        self._save()
+
+    def check_and_request_permission(self, controller, file_path: str) -> bool:
+        if self.check_permission(file_path):
+            return True
+        path_obj = Path(file_path).resolve()
+        question = f"Need permission to access:\n" f"  File: {path_obj}\n" f"  Directory: {path_obj.parent}\n" f"What's your decision?"
+        options = [
+            f"Grant file access ({path_obj.name})",
+            f"Grant directory access ({path_obj.parent.name})",
+            "Deny",
+        ]
+        ask_tool = controller.registry.get("ask")
+        if not ask_tool:
+            return False
+        choice = ask_tool.execute(controller.context, {"question": question, "options": options})
+        if choice == "1":
+            self.grant(file_path, "file")
+            return True
+        elif choice == "2":
+            self.grant(file_path, "dir")
+            return True
+        return False
+
+
+# =============================================================================
+# 4. Tool Registry
 # =============================================================================
 
 
@@ -883,6 +955,7 @@ class Controller:
         self.root = os.path.abspath(workspace_root)
         self.cfg = Config.load_for_root(self.root)
         self.registry = Registry()
+        self.perm_manager = PermissionManager()
         self.provider: Optional[Provider] = None
         self.context: Optional[Context] = None
         self.step_count = 0
@@ -1063,7 +1136,7 @@ class Controller:
                         except json.JSONDecodeError:
                             args = {}
                         # execute_gated blocks writers when plan_mode is on.
-                        result = self.registry.execute_gated(tname, self.context, args)
+                        result = self.registry.execute_gated(tname, self, args)
                         self.context.add_tool_result(tname, tid, result)
                         call_str = f"call: {tname}\nargs: {json.dumps(args, ensure_ascii=False)}"
                         res_str = f"result:\n{result[:600]}"
@@ -1154,7 +1227,7 @@ def _read_input_auto(timeout: float = 0.08) -> str:
                     break
                 except KeyboardInterrupt:
                     q.put("")
-                    _stdout("\n") # New line for visual clean-up
+                    _stdout("\n")  # New line for visual clean-up
 
         threading.Thread(target=_reader, daemon=True).start()
 
@@ -1165,7 +1238,7 @@ def _read_input_auto(timeout: float = 0.08) -> str:
     first = q.get()
     if first is None:
         raise EOFError()
-    
+
     # Check if first is empty due to interruption
     if first == "":
         return ""
