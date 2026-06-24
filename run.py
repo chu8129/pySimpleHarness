@@ -232,6 +232,10 @@ class Config(BaseModel):
         return [s for s in self.skills_data if s.name in self.skills.enabled]
 
 
+def _stdout(msg: str):
+    sys.stdout.write(msg + "\n")
+    sys.stdout.flush()
+
 # =============================================================================
 # Logging helpers
 # =============================================================================
@@ -535,9 +539,9 @@ class AskTool(Tool):
         return True
 
     def execute(self, ctx, args):
-        print(f"\n[ASK] {args['question']}")
+        _stdout(f"\n[ASK] {args['question']}")
         for i, opt in enumerate(args.get("options", []), 1):
-            print(f"  {i}. {opt}")
+            _stdout(f"  {i}. {opt}")
         if not sys.stdin.isatty():
             return "<model-assumption> Proceeding with default."
         try:
@@ -566,7 +570,7 @@ class TodoWriteTool(Tool):
             ctx.todos = args["todos"]
             # Visual feedback for task progress in terminal
             todo_display = "\n".join([f"  [{t['status']:<11}] {t['content']}" for t in args['todos']])
-            print(f"\n\U0001f4dd TASK PROGRESS:\n{todo_display}\n")
+            _stdout(f"\n\U0001f4dd TASK PROGRESS:\n{todo_display}\n")
         return f"Updated {len(args['todos'])} todos"
 
 
@@ -990,27 +994,27 @@ class Controller:
         Returns True on approval. Mirrors Harness requestApproval called with
         planApprovalTool after a plan-mode turn finishes.
         """
-        print("\n" + "\u2550" * 60)
-        print("\U0001f4cb  PLAN MODE \u2014 proposed plan:")
-        print("\u2550" * 60)
-        print(proposal)
-        print("\u2550" * 60)
+        _stdout("\n" + "\u2550" * 60)
+        _stdout("\U0001f4cb  PLAN MODE \u2014 proposed plan:")
+        _stdout("\u2550" * 60)
+        _stdout(proposal)
+        _stdout("\u2550" * 60)
         if not sys.stdin.isatty():
             # Non-interactive: auto-approve (mirrors headless bot behaviour).
-            print("[non-interactive] Auto-approving plan.")
+            _stdout("[non-interactive] Auto-approving plan.")
             return True
         while True:
             try:
                 ans = input("Approve this plan? [y/n] ").strip().lower()
             except (EOFError, KeyboardInterrupt):
-                print()
+                _stdout("")
                 return False
             if ans in ("y", "yes", ""):
                 return True
             if ans in ("n", "no"):
-                print("Plan rejected. Plan mode remains active. Enter revised instructions.")
+                _stdout("Plan rejected. Plan mode remains active. Enter revised instructions.")
                 return False
-            print("Please answer y (approve) or n (reject).")
+            _stdout("Please answer y (approve) or n (reject).")
 
     def _run_turn(self, composed_input: str) -> str:
         """Run one model turn (tool loop) and return the last assistant text.
@@ -1108,7 +1112,7 @@ class Controller:
             return "Plan rejected. Plan mode is still active. Send revised instructions."
 
         # ── Approved: exit plan mode and execute ──────────────────────────────
-        print("\n\u2705 Plan approved \u2014 executing...")
+        _stdout("\n\u2705 Plan approved \u2014 executing...")
         self.set_plan_mode(False)
 
         # Seed a starter todo list from the plan (mirrors seedPlanTodos).
@@ -1150,7 +1154,7 @@ def _read_input_auto(timeout: float = 0.08) -> str:
                     break
                 except KeyboardInterrupt:
                     q.put("")
-                    print("\n") # New line for visual clean-up
+                    _stdout("\n") # New line for visual clean-up
 
         threading.Thread(target=_reader, daemon=True).start()
 
@@ -1181,7 +1185,7 @@ def _read_input_auto(timeout: float = 0.08) -> str:
             break
         except KeyboardInterrupt:
             # Handle Ctrl+C mid-input as a request to cancel, return an empty string
-            print("\n")
+            _stdout("\n")
             return ""
 
     return "\n".join(lines)
@@ -1226,69 +1230,69 @@ def main(argv=None) -> None:
             ctrl.provider = Provider(default)
             log_box("boot", f"Resumed session: {args.resume}\nWorkspace: {ctrl.root}\nMessages: {len(ctrl.context.messages)}")
             if not args.request:
-                print(COMMANDS_HELP)
+                _stdout(COMMANDS_HELP)
         else:
-            print(f"Session '{args.resume}' not found. Starting fresh.")
+            _stdout(f"Session '{args.resume}' not found. Starting fresh.")
             ctrl.boot()
     else:
         ctrl.boot()
 
     if args.request:
-        print(f"\n=== Result ===\n{ctrl.run(args.request)}")
+        _stdout(f"\n=== Result ===\n{ctrl.run(args.request)}")
     else:
-        print(COMMANDS_HELP)
+        _stdout(COMMANDS_HELP)
         while True:
             try:
                 req = _read_input_auto()
                 if not req:
                     continue
             except EOFError:
-                print()
+                _stdout("")
                 break
             except KeyboardInterrupt:
-                print()
+                _stdout("")
                 continue
             req = req.strip()
             if not req:
                 continue
             if req in ("/help", "?"):
-                print(COMMANDS_HELP)
+                _stdout(COMMANDS_HELP)
                 continue
             if req in ("/new", "/clear"):
                 sid = ctrl.save_session()
                 ctrl.reset_context()
-                print(f"New context started. Previous session: --resume {sid}")
+                _stdout(f"New context started. Previous session: --resume {sid}")
                 continue
             if req.startswith("/model"):
                 parts = req.split(None, 1)
                 if len(parts) == 1:
-                    print("\n".join(ctrl.list_providers()))
+                    _stdout("\n".join(ctrl.list_providers()))
                 else:
-                    print(ctrl.switch_provider(parts[1]))
+                    _stdout(ctrl.switch_provider(parts[1]))
                 continue
             if req == "/plan" or req.startswith("/plan "):
                 parts = req.split(None, 1)
                 sub = parts[1].strip().lower() if len(parts) > 1 else "on"
                 if sub in ("off", "disable", "false", "0"):
                     ctrl.set_plan_mode(False)
-                    print("Plan mode: OFF — writers unblocked.")
+                    _stdout("Plan mode: OFF — writers unblocked.")
                 elif sub in ("status",):
                     state = "ON" if ctrl.plan_mode else "OFF"
-                    print(f"Plan mode: {state}")
+                    _stdout(f"Plan mode: {state}")
                 else:
                     # "on" / "enable" / bare "/plan"
                     ctrl.set_plan_mode(True)
-                    print("Plan mode: ON — next request will be planned before execution.")
-                    print("  Writers are blocked until you approve the plan.")
-                    print("  Use /plan off to cancel without sending a request.")
+                    _stdout("Plan mode: ON — next request will be planned before execution.")
+                    _stdout("  Writers are blocked until you approve the plan.")
+                    _stdout("  Use /plan off to cancel without sending a request.")
                 continue
             try:
-                print(f"\n{ctrl.run(req)}\n")
+                _stdout(f"\n{ctrl.run(req)}\n")
             except KeyboardInterrupt:
-                print("\n\n⚠️  Cancelled (Ctrl+C). Context retained, feel free to send new requests.")
+                _stdout("\n\n⚠️  Cancelled (Ctrl+C). Context retained, feel free to send new requests.")
                 continue
         sid = ctrl.save_session()
-        print(f"\nSession saved. Resume with: --resume {sid}")
+        _stdout(f"\nSession saved. Resume with: --resume {sid}")
 
 
 # Rebuild models to resolve forward references
