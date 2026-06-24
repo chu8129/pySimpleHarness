@@ -1343,6 +1343,19 @@ def main(argv=None) -> None:
                 else:
                     _stdout(ctrl.switch_provider(parts[1]))
                 continue
+            if req == "/skills":
+                skills_list = "\n".join([f"/{s.name} — {s.description}" for s in ctrl.cfg.enabled_skills()])
+                _stdout(f"Available skills:\n{skills_list}")
+                continue
+            if req.startswith("/") and ctrl.cfg.get_skill(req[1:].split()[0]):
+                skill_name = req[1:].split()[0]
+                skill_args = req[1:].split()[1:]
+                skill = ctrl.cfg.get_skill(skill_name)
+                _stdout(f"Triggering skill: {skill_name} with args: {skill_args}")
+                # 实际执行逻辑：将 skill.body 和参数注入到 context 中进行对话
+                ctrl.context.add_user(f"Execute skill {skill_name} with args: {' '.join(skill_args)}\n\nSkill definition:\n{skill.body}")
+                _stdout(f"\n{ctrl.run('Proceed with this skill execution')}\n")
+                continue
             if req == "/plan" or req.startswith("/plan "):
                 parts = req.split(None, 1)
                 sub = parts[1].strip().lower() if len(parts) > 1 else "on"
