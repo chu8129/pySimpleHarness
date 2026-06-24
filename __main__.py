@@ -150,6 +150,8 @@ class Config(BaseModel):
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
+    plan_mode_marker: str = ""
+    plan_approved_message: str = ""
     # skills_data is loaded separately from skills.yaml, not from main config
 
     @classmethod
@@ -599,39 +601,7 @@ class TodoWriteTool(Tool):
 # Plan Mode support
 # =============================================================================
 
-# fmt:off
-# PlanModeMarker is prepended to every user turn while plan mode is on.
-# It rides in the user message (not the system prompt), so the cache-stable
-# prompt prefix is untouched and the toggle costs nothing in cache hits.
-# Mirrors DeepSeek-Harness internal/control/input.go : PlanModeMarker.
-PLAN_MODE_MARKER = (
-    "[Plan mode \u2014 read-only. Explore the codebase first "
-    "(read_file, ls, grep, glob, web_fetch, ask are available; "
-    "writers are refused by the harness). "
-    "Before planning, if a decision that is genuinely the user\u2019s \u2014 "
-    "tech stack, an ambiguous requirement, scope, an irreversible choice \u2014 "
-    "would materially shape the plan and you can\u2019t settle it from the codebase "
-    "or a sensible default, use the ask tool to clarify it first; otherwise pick "
-    "the obvious default and state the assumption in the plan instead of asking. "
-    "Then present a LAYERED plan as your reply and stop \u2014 do not write files, "
-    "edit, or run side-effecting bash. Structure the plan as a two-level markdown "
-    "list: each PHASE is a top-level numbered list item (e.g. \"1. Add the config "
-    "loader\"), and each phase\u2019s sub-steps are bullets indented beneath it "
-    "(e.g. \"   - parse the TOML into Config\"). Keep phases few (2\u20136). "
-    "The user will be asked to approve before any changes are made.]"
-)
-
-# Injected as the follow-up user turn once the user approves a plan.
-# Mirrors DeepSeek-Harness planApprovedMessage in controller.go.
-PLAN_APPROVED_MESSAGE = (
-    "Plan approved \u2014 plan mode is off; you\u2019re cleared to make the changes "
-    "without asking again. Implement the plan now. Use this serial workflow: "
-    "1) mark the first sub-step in_progress with todo_write; "
-    "2) execute the sub-step; "
-    "3) mark it completed and move the next one to in_progress. "
-    "Sign off one sub-step at a time \u2014 never batch multiple completions."
-)
-# fmt:on
+# (Moved to config.yaml)
 
 
 def parse_plan_todos(plan: str) -> List[dict]:
@@ -1115,7 +1085,7 @@ class Controller:
         message so the cache-stable system prefix is never modified.
         """
         if self._plan_mode:
-            return PLAN_MODE_MARKER + "\n\n" + text
+            return self.cfg.plan_mode_marker + "\n\n" + text
         return text
 
     def _request_plan_approval(self, proposal: str) -> bool:
@@ -1288,7 +1258,7 @@ class Controller:
             log_box("tool", f"todo_write (plan seed)\n{todo_log}")
 
         # Execution turn with plan-approved nudge (mirrors planApprovedMessage turn).
-        return self._run_turn(PLAN_APPROVED_MESSAGE)
+        return self._run_turn(self.cfg.plan_approved_message)
 
 
 # =============================================================================
