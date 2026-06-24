@@ -32,26 +32,15 @@ import subprocess
 import readline
 import urllib.request
 import logging
+import yaml
+from loguru import logger
 from abc import ABC, abstractmethod
 from typing import Any, Optional, List, Dict
 from typing import List as TypingList
 from enum import Enum
 from pathlib import Path
-from rich.console import Console
-from rich.markdown import Markdown
-
-# =============================================================================
-# Dependencies
-# =============================================================================
-try:
-    import yaml
-    from loguru import logger
-    from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-    from pydantic import BaseModel, Field
-except ImportError as e:
-    raise ImportError(f"Required dependencies missing: {e}. Install: pip install pyyaml loguru tenacity")
-
-
+from pydantic import BaseModel, Field
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from rich.console import Console
 from rich.markdown import Markdown
 
@@ -756,6 +745,12 @@ class Registry:
             return f"Error: tool '{name}' not found"
         if self.plan_mode and not tool.read_only():
             return f"[plan-mode] Tool '{name}' is a writer and is blocked in plan mode. " "Present your plan as a markdown list so the user can approve it first."
+        # Validate required parameters before execution.
+        schema = tool.schema()
+        required = schema.get("required", [])
+        missing = [p for p in required if p not in args]
+        if missing:
+            return f"Error: tool '{name}' missing required parameters: {', '.join(missing)}"
         return tool.execute(ctx, args)
 
 
