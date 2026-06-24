@@ -565,6 +565,78 @@ class TodoWriteTool(Tool):
 
 
 # =============================================================================
+# Plan Mode support
+# =============================================================================
+
+# fmt:off
+# PlanModeMarker is prepended to every user turn while plan mode is on.
+# It rides in the user message (not the system prompt), so the cache-stable
+# prompt prefix is untouched and the toggle costs nothing in cache hits.
+# Mirrors DeepSeek-Reasonix internal/control/input.go : PlanModeMarker.
+PLAN_MODE_MARKER = (
+    "[Plan mode \u2014 read-only. Explore the codebase first "
+    "(read_file, ls, grep, glob, web_fetch, ask are available; "
+    "writers are refused by the harness). "
+    "Before planning, if a decision that is genuinely the user\u2019s \u2014 "
+    "tech stack, an ambiguous requirement, scope, an irreversible choice \u2014 "
+    "would materially shape the plan and you can\u2019t settle it from the codebase "
+    "or a sensible default, use the ask tool to clarify it first; otherwise pick "
+    "the obvious default and state the assumption in the plan instead of asking. "
+    "Then present a LAYERED plan as your reply and stop \u2014 do not write files, "
+    "edit, or run side-effecting bash. Structure the plan as a two-level markdown "
+    "list: each PHASE is a top-level numbered list item (e.g. \"1. Add the config "
+    "loader\"), and each phase\u2019s sub-steps are bullets indented beneath it "
+    "(e.g. \"   - parse the TOML into Config\"). Keep phases few (2\u20136). "
+    "The user will be asked to approve before any changes are made.]"
+)
+
+# Injected as the follow-up user turn once the user approves a plan.
+# Mirrors DeepSeek-Reasonix planApprovedMessage in controller.go.
+PLAN_APPROVED_MESSAGE = (
+    "Plan approved \u2014 plan mode is off; you\u2019re cleared to make the changes "
+    "without asking again. Implement the plan now. Use this serial workflow: "
+    "1) mark the first sub-step in_progress with todo_write; "
+    "2) execute the sub-step; "
+    "3) mark it completed and move the next one to in_progress. "
+    "Sign off one sub-step at a time \u2014 never batch multiple completions."
+)
+# fmt:on
+
+
+def parse_plan_todos(plan: str) -> List[dict]:
+    """Extract a starter task list from an approved plan's markdown list items.
+
+    Mirrors DeepSeek-Reasonix parsePlanTodos (internal/control/controller.go).
+    First item gets status='in_progress'; the rest 'pending'. Capped at 20.
+    """
+    import re
+
+    todos: List[dict] = []
+    for raw in plan.splitlines():
+        stripped = raw.lstrip(" \t")
+        if not stripped:
+            continue
+        content: Optional[str] = None
+        level = 0
+        indent = len(raw) - len(stripped)
+        m = re.match(r"^(\d+)[.)]\s+(.*)", stripped)
+        if m:
+            content = m.group(2).strip()
+            level = 1 if indent >= 2 else 0
+        elif re.match(r"^[-*+]\s", stripped):
+            content = stripped[2:].strip()
+            level = 1 if indent >= 2 else 0
+        if content:
+            content = content.replace("`", "").replace("**", "").strip()
+            if content:
+                status = "in_progress" if len(todos) == 0 else "pending"
+                todos.append({"id": str(len(todos) + 1), "content": content, "status": status, "level": level})
+                if len(todos) >= 20:
+                    break
+    return todos
+
+
+# =============================================================================
 # 3. Tool Registry
 # =============================================================================
 
@@ -572,6 +644,9 @@ class TodoWriteTool(Tool):
 class Registry:
     def __init__(self):
         self._tools: Dict[str, Tool] = {}
+        # When True, writer tools are blocked (plan-mode gate).
+        # Mirrors Reasonix executor.SetPlanMode.
+        self.plan_mode: bool = False
 
     def add(self, tool: Tool) -> None:
         self._tools[tool.name()] = tool
@@ -583,7 +658,20 @@ class Registry:
         return list(self._tools.values())
 
     def schemas(self) -> List[dict]:
+        """Return tool schemas. In plan mode, omit writer tools so the model
+        never sees them in its call list (mirrors Reasonix executor gate)."""
+        if self.plan_mode:
+            return [t.to_dict() for t in self._tools.values() if t.read_only()]
         return [t.to_dict() for t in self._tools.values()]
+
+    def execute_gated(self, name: str, ctx: Any, args: dict) -> str:
+        """Execute a tool, enforcing the plan-mode gate for writers."""
+        tool = self.get(name)
+        if tool is None:
+            return f"Error: tool '{name}' not found"
+        if self.plan_mode and not tool.read_only():
+            return f"[plan-mode] Tool '{name}' is a writer and is blocked in plan mode. " "Present your plan as a markdown list so the user can approve it first."
+        return tool.execute(ctx, args)
 
 
 ALL_TOOLS = [ReadFileTool, WriteFileTool, EditFileTool, MultiEditTool, BashTool, GrepTool, GlobTool, LsTool, WebFetchTool, AskTool, TodoWriteTool]
@@ -813,6 +901,19 @@ class Controller:
         self.provider: Optional[Provider] = None
         self.context: Optional[Context] = None
         self.step_count = 0
+        # Plan-mode state: when True, PlanModeMarker is prepended to outgoing
+        # turns and writer tools are blocked via registry.plan_mode.
+        # Mirrors Reasonix Controller.planMode / SetPlanMode.
+        self._plan_mode: bool = False
+
+    def set_plan_mode(self, on: bool) -> None:
+        """Toggle plan mode and synchronise the registry gate."""
+        self._plan_mode = on
+        self.registry.plan_mode = on
+
+    @property
+    def plan_mode(self) -> bool:
+        return self._plan_mode
 
     def _sessions_dir(self) -> Path:
         d = Path.home() / ".reasonix" / "sessions"
@@ -888,12 +989,59 @@ class Controller:
         self.context = Context(system_prompt, self.cfg.agent)
         log_box("boot", f"Workspace: {self.root}\nTools: {[t.name() for t in self.registry.list()]}\nSkills: {[s.name for s in self.cfg.enabled_skills()]}\nProvider: {self.provider.entry.name}")
 
-    def run(self, user_request: str) -> str:
-        if self.context is None:
-            self.boot()
-        self.context.add_user(user_request)
-        log_box("user", user_request[:500])
+    # ------------------------------------------------------------------
+    # Plan-mode helpers
+    # ------------------------------------------------------------------
+
+    def _compose(self, text: str) -> str:
+        """Prepend PlanModeMarker when plan mode is active.
+
+        Mirrors Reasonix control.Controller.Compose: the marker rides the user
+        message so the cache-stable system prefix is never modified.
+        """
+        if self._plan_mode:
+            return PLAN_MODE_MARKER + "\n\n" + text
+        return text
+
+    def _request_plan_approval(self, proposal: str) -> bool:
+        """Show the plan proposal and ask the user to approve or reject.
+
+        Returns True on approval. Mirrors Reasonix requestApproval called with
+        planApprovalTool after a plan-mode turn finishes.
+        """
+        print("\n" + "\u2550" * 60)
+        print("\U0001f4cb  PLAN MODE \u2014 proposed plan:")
+        print("\u2550" * 60)
+        print(proposal)
+        print("\u2550" * 60)
+        if not sys.stdin.isatty():
+            # Non-interactive: auto-approve (mirrors headless bot behaviour).
+            print("[non-interactive] Auto-approving plan.")
+            return True
+        while True:
+            try:
+                ans = input("Approve this plan? [y/n] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return False
+            if ans in ("y", "yes", ""):
+                return True
+            if ans in ("n", "no"):
+                print("Plan rejected. Plan mode remains active. Enter revised instructions.")
+                return False
+            print("Please answer y (approve) or n (reject).")
+
+    def _run_turn(self, composed_input: str) -> str:
+        """Run one model turn (tool loop) and return the last assistant text.
+
+        Separated from run() so the plan approval flow can call it for the
+        follow-up execution turn without re-applying _compose. Uses
+        registry.execute_gated so the plan-mode gate is enforced on every
+        tool call inside this turn too.
+        """
+        self.context.add_user(composed_input)
         max_steps = self.cfg.agent.max_steps or 25
+        last_content = ""
         for _ in range(max_steps):
             self.step_count += 1
             print(f"\n{'=' * 40} Step {self.step_count} {'=' * 40}")
@@ -902,7 +1050,7 @@ class Controller:
             tools = self.registry.schemas()
             if not self.provider:
                 return "Error: no provider"
-            # KeyboardInterrupt 在此处直接向上传播，不捕获
+            # KeyboardInterrupt propagates upward to be handled by the CLI layer.
             response = self.provider.chat(messages, tools, self.cfg.agent.temperature)
             content = response.get("content", "")
             tool_calls = response.get("tool_calls", [])
@@ -914,10 +1062,11 @@ class Controller:
                 model_parts.append(content[:500])
             if tool_calls:
                 tc_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
-                model_parts.append(f"→ tools: {', '.join(tc_names)}")
+                model_parts.append(f"\u2192 tools: {', '.join(tc_names)}")
             if model_parts:
                 log_box("model", "\n".join(model_parts))
             self.context.add_assistant(content or "", tool_calls=tool_calls or None)
+            last_content = content or last_content
             if tool_calls:
                 for tc in tool_calls:
                     tid = tc.get("id", "unknown")
@@ -927,18 +1076,65 @@ class Controller:
                         args = json.loads(fn.get("arguments", "{}")) if isinstance(fn.get("arguments"), str) else fn.get("arguments", {})
                     except json.JSONDecodeError:
                         args = {}
-                    tool = self.registry.get(tname)
-                    # 工具执行期间的 KeyboardInterrupt 同样向上传播
-                    result = tool.execute(self.context, args) if tool else f"Error: tool '{tname}' not found"
+                    # execute_gated blocks writers when plan_mode is on.
+                    result = self.registry.execute_gated(tname, self.context, args)
                     self.context.add_tool_result(tname, tid, result)
                     call_str = f"call: {tname}\nargs: {json.dumps(args, ensure_ascii=False)[:1024]}"
                     res_str = f"result:\n{result[:600]}"
-                    log_box("tool", f"{call_str}\n{'─' * 36}\n{res_str}")
+                    log_box("tool", f"{call_str}\n{'\u2500' * 36}\n{res_str}")
             else:
                 return content or "(no response)"
             if finish == "stop":
                 return content or "(stopped)"
-        return "(max_steps reached)"
+        return last_content or "(max_steps reached)"
+
+    def run(self, user_request: str) -> str:
+        """Run a user request, honouring plan mode.
+
+        Plan-mode flow (mirrors Reasonix runTurnWithRawDisplay):
+          1. Prepend PlanModeMarker and run a read-only research/planning turn.
+          2. Present the proposal to the user for approval.
+          3a. Approved  -> exit plan mode, seed todos, run execution turn.
+          3b. Rejected  -> stay in plan mode; user can revise and re-submit.
+
+        Normal flow: just run the tool loop.
+        """
+        if self.context is None:
+            self.boot()
+
+        log_box("user", user_request[:500])
+        composed = self._compose(user_request)
+
+        if not self._plan_mode:
+            # Normal (non-plan) execution path.
+            return self._run_turn(composed)
+
+        # ── Plan mode: research / planning turn ───────────────────────────────
+        proposal = self._run_turn(composed)
+
+        if not proposal or not proposal.strip():
+            return "(plan mode: no proposal generated)"
+
+        # ── Approval gate ─────────────────────────────────────────────────────
+        approved = self._request_plan_approval(proposal)
+
+        if not approved:
+            # Keep plan mode on so the user can refine and re-submit.
+            return "Plan rejected. Plan mode is still active. Send revised instructions."
+
+        # ── Approved: exit plan mode and execute ──────────────────────────────
+        print("\n\u2705 Plan approved \u2014 executing...")
+        self.set_plan_mode(False)
+
+        # Seed a starter todo list from the plan (mirrors seedPlanTodos).
+        todos = parse_plan_todos(proposal)
+        if todos and self.context is not None:
+            self.context.todos = todos
+            todo_log = "\n".join(f"  [{t['status']}] {t['content']}" for t in todos)
+            log_box("tool", f"todo_write (plan seed)\n{todo_log}")
+
+        # Execution turn with plan-approved nudge (mirrors planApprovedMessage turn).
+        return self._run_turn(PLAN_APPROVED_MESSAGE)
 
 
 # =============================================================================
@@ -1037,7 +1233,7 @@ def main(argv=None) -> None:
     if args.request:
         print(f"\n=== Result ===\n{ctrl.run(args.request)}")
     else:
-        print("Reasonix ready. Enter requests (Ctrl-D to exit). Commands: /new, /model")
+        print("Reasonix ready. Enter requests (Ctrl-D to exit). Commands: /new, /model, /plan [on|off]")
         while True:
             try:
                 req = _read_input_auto()
@@ -1061,6 +1257,29 @@ def main(argv=None) -> None:
                     print("\n".join(ctrl.list_providers()))
                 else:
                     print(ctrl.switch_provider(parts[1]))
+                continue
+            # /plan command: toggle plan mode on/off, or show current status.
+            # Usage:
+            #   /plan        -> enter plan mode (next request will be planned first)
+            #   /plan on     -> enter plan mode
+            #   /plan off    -> exit plan mode
+            #   /plan status -> show current plan-mode state
+            # Mirrors Reasonix slash.go autoPlanArgItems + controller SetPlanMode.
+            if req == "/plan" or req.startswith("/plan "):
+                parts = req.split(None, 1)
+                sub = parts[1].strip().lower() if len(parts) > 1 else "on"
+                if sub in ("off", "disable", "false", "0"):
+                    ctrl.set_plan_mode(False)
+                    print("Plan mode: OFF — writers unblocked.")
+                elif sub in ("status",):
+                    state = "ON" if ctrl.plan_mode else "OFF"
+                    print(f"Plan mode: {state}")
+                else:
+                    # "on" / "enable" / bare "/plan"
+                    ctrl.set_plan_mode(True)
+                    print("Plan mode: ON — next request will be planned before execution.")
+                    print("  Writers are blocked until you approve the plan.")
+                    print("  Use /plan off to cancel without sending a request.")
                 continue
             try:
                 print(f"\n{ctrl.run(req)}\n")
