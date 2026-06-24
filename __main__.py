@@ -1159,7 +1159,14 @@ class Controller:
                         # execute_gated blocks writers when plan_mode is on.
                         result = self.registry.execute_gated(tname, self, args)
                         self.context.add_tool_result(tname, tid, result)
-                        call_str = f"call: {tname}\nargs: {json.dumps(args, ensure_ascii=False)}"
+                        
+                        def format_args(args_dict):
+                            try:
+                                return json.dumps(args_dict, ensure_ascii=False, indent=2)
+                            except:
+                                return str(args_dict)
+
+                        call_str = f"call: {tname}\nargs: {format_args(args)}"
                         res_str = f"result:\n{result[:600]}"
                         log_box("tool", f"{call_str}\n{'\u2500' * 36}\n{res_str}")
                 else:
