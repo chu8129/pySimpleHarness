@@ -5,3 +5,4 @@ python-dotenv>=1.0
 litellm>=1.40
 loguru>=0.7
 rich>=13.0
+prompt_toolkit>=3.0

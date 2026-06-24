@@ -20,6 +20,7 @@ Usage Example:
 """
 
 from __future__ import annotations
+
 # =============================================================================
 # Imports
 # =============================================================================
@@ -44,19 +45,23 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from rich.console import Console
 from rich.markdown import Markdown
 
-# 初始化 rich console
+# Initialize console
 console = Console()
+
 
 def rich_print(text: str):
     console.print(Markdown(text))
+
 
 def _load_dotenv(env_file: str = ".env") -> None:
     """Load environment variables from .env file."""
     try:
         from dotenv import load_dotenv
+
         load_dotenv(env_file, override=False)
     except ImportError:
         raise ImportError("Required dependency 'python-dotenv' is missing. Please install it with: pip install python-dotenv")
+
 
 def _stdout(msg: str):
     sys.stdout.write(msg + "\n")
@@ -75,7 +80,6 @@ class AgentConfig(BaseModel):
     subagent_model: str = ""
     subagent_models: Dict[str, str] = Field(default_factory=dict)
     output_style: str = ""
-    soft_compact_ratio: float = 0.5
     compact_ratio: float = 0.8
     compact_force_ratio: float = 0.9
 
@@ -118,7 +122,7 @@ class ProviderEntry(BaseModel):
     api_key_env: str = ""
     context_window: int = 0
     request_timeout: int = 120
-    delay_seconds: float = 0.0  # New: Request delay for this model
+    delay_seconds: float = 0.0
     retry_times: int = 3
     price: Dict[str, float] = Field(default_factory=dict)
     effort: str = ""
@@ -131,9 +135,9 @@ class SkillEntry(BaseModel):
     name: str
     description: str = ""
     body: str = ""
-    path: str = ""  # skill directory path, so model knows where to find scripts/references
+    path: str = ""
     allowed_tools: List[str] = Field(default_factory=list)
-    run_as: str = "subagent"  # "subagent" | "inline"
+    run_as: str = "subagent"
 
 
 class Config(BaseModel):
@@ -151,28 +155,23 @@ class Config(BaseModel):
     @classmethod
     def load_for_root(cls, workspace_root: str) -> Config:
         """Load config from YAML with resolution: project > user > defaults."""
-        # 1. Start with defaults
         cfg = Config()
 
-        # 2. Merge user config (~/.reasonix/config.yaml)
         user_config = Path.home() / ".reasonix" / "config.yaml"
         if user_config.exists():
             cfg = cfg._merge_yaml(user_config)
 
-        # 3. Merge project config (./config.yaml)
         project_config = Path(workspace_root) / "config.yaml"
         if project_config.exists():
             cfg = cfg._merge_yaml(project_config)
 
-        # 4. Load skills from separate skills.yaml
         skills_yaml = Path(workspace_root) / "skills.yaml"
         all_skills = []
         if skills_yaml.exists():
             with open(skills_yaml, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
                 all_skills.extend([SkillEntry.model_validate(s) for s in data.get("skills", [])])
-        
-        # Also load dynamic skills from ./skills directory (each has SKILL.md)
+
         skills_dir = Path(workspace_root) / "skills"
         if skills_dir.exists():
             for s_dir in skills_dir.iterdir():
@@ -181,20 +180,18 @@ class Config(BaseModel):
                 md_path = s_dir / "SKILL.md"
                 if not md_path.exists():
                     continue
-                content = md_path.read_text(encoding='utf-8')
-                data = {'name': s_dir.name, 'body': content, 'path': str(s_dir.resolve())}
-                # Parse YAML frontmatter (between --- delimiters)
-                if content.startswith('---'):
-                    parts = content.split('---', 2)
+                content = md_path.read_text(encoding="utf-8")
+                data = {"name": s_dir.name, "body": content, "path": str(s_dir.resolve())}
+                if content.startswith("---"):
+                    parts = content.split("---", 2)
                     if len(parts) >= 3:
                         fm = yaml.safe_load(parts[1]) or {}
                         if isinstance(fm, dict):
-                            data['name'] = fm.get('name', s_dir.name)
-                            data['description'] = fm.get('description', '')
+                            data["name"] = fm.get("name", s_dir.name)
+                            data["description"] = fm.get("description", "")
                 all_skills.append(SkillEntry.model_validate(data))
-        
-        cfg._skills_data = all_skills
 
+        cfg._skills_data = all_skills
         return cfg
 
     def _merge_yaml(self, path: Path) -> Config:
@@ -766,8 +763,35 @@ class Registry:
         tool = self.get(name)
         if tool is None:
             return f"Error: tool '{name}' not found"
+
+        # Plan-mode gate: writers are blocked unless specifically granted
         if self.plan_mode and not tool.read_only():
-            return f"[plan-mode] Tool '{name}' is a writer and is blocked in plan mode. " "Present your plan as a markdown list so the user can approve it first."
+            # Check if this tool execution was already approved in plan mode
+            # We use context to store approved writes during plan mode
+            approved_writes = getattr(ctx, "approved_writes", set())
+            write_key = f"{name}:{args.get('path', 'unknown')}"
+
+            if write_key not in approved_writes:
+                # Ask user for permission
+                question = f"Plan mode is ON. Tool '{name}' is a writer (target: {args.get('path', 'unknown')}).\n" f"Allow this write operation?"
+                options = ["Yes", "No (queue for later)"]
+
+                ask_tool = self.get("ask")
+                if ask_tool:
+                    choice = ask_tool.execute(ctx, {"question": question, "options": options})
+                    if choice == "1":
+                        approved_writes.add(write_key)
+                        setattr(ctx, "approved_writes", approved_writes)
+                        return tool.execute(ctx, args)
+                    else:
+                        # Queue for later
+                        pending = getattr(ctx, "pending_writes", [])
+                        pending.append((tool, args))
+                        setattr(ctx, "pending_writes", pending)
+                        return f"[plan-mode] Tool '{name}' write blocked and queued for after plan approval."
+                else:
+                    return f"[plan-mode] Writer blocked (no ask tool available)."
+
         # Validate required parameters before execution.
         schema = tool.schema()
         required = schema.get("required", [])
@@ -853,9 +877,12 @@ class Context:
         return total // 4
 
     def compact(self, force: bool = False) -> None:
+        pass
+
+    def compact(self, max_tokens: int, force: bool = False) -> None:
         ratio = self.cfg.compact_force_ratio if force else self.cfg.compact_ratio
-        max_tokens = 128000 * ratio
-        if self.estimate_tokens() < max_tokens:
+        effective_limit = max_tokens * ratio
+        if self.estimate_tokens() < effective_limit:
             return
         # Simple compaction: summarize oldest messages
         to_compress = []
@@ -869,11 +896,13 @@ class Context:
                 keep.append(m)
         if to_compress:
             summary = f"[Summary of {len(to_compress)} messages]"
-            self.messages = [Message(MessageRole.SYSTEM, self.system_prompt), Message(MessageRole.ASSISTANT, summary)] + keep
+            self.messages = [Message(MessageRole.ASSISTANT, summary)] + keep
 
     def to_openai(self) -> List[dict]:
         out = [{"role": "system", "content": self.system_prompt}]
         for m in self.messages:
+            if m.role == MessageRole.SYSTEM:
+                continue
             entry = {"role": m.role.value, "content": m.content}
             if m.name:
                 entry["name"] = m.name
@@ -955,10 +984,13 @@ class Provider:
             return {"content": msg.content or "", "tool_calls": tool_calls, "finish_reason": choice.finish_reason or ""}
         except exceptions.RateLimitError as e:
             logger.error(f"Rate limit exceeded: {e}")
-            return {"content": f"Error: API Rate Limit Exceeded. Please wait a moment and try again. Original error: {str(e)}", "tool_calls": [], "finish_reason": "error"}
+            return {"content": "Error: API Rate Limit Exceeded. Please wait a moment and try again.", "tool_calls": [], "finish_reason": "error"}
         except exceptions.AuthenticationError as e:
             logger.error(f"Authentication failed: {e}")
             return {"content": "Error: Authentication failed. Check your API key.", "tool_calls": [], "finish_reason": "error"}
+        except exceptions.ServiceUnavailableError as e:
+            logger.error(f"Service Unavailable: {e}")
+            return {"content": "Error: Service is currently unavailable (e.g. high load). Please try again in a few moments.", "tool_calls": [], "finish_reason": "error"}
         except Exception as e:
             if is_retryable(e):
                 raise  # Trigger tenacity retry
@@ -1066,6 +1098,10 @@ class Controller:
         self.provider = Provider(default)
         system_prompt = self.cfg.resolve_system_prompt(self.root)
         self.context = Context(system_prompt, self.cfg.agent)
+
+        _cmd = " ".join(getattr(sys, "orig_argv", sys.argv))
+        self.context.add_user(f"System initialized. Service started with command: `{_cmd}`")
+
         log_box("boot", f"Workspace: {self.root}\nTools: {[t.name() for t in self.registry.list()]}\nSkills: {[s.name for s in self.cfg.enabled_skills()]}\nProvider: {self.provider.entry.name}\nModel: {self.provider.entry.model}\nBase URL: {self.provider.entry.base_url}")
 
     # ------------------------------------------------------------------
@@ -1125,13 +1161,20 @@ class Controller:
             for _ in range(max_steps):
                 self.step_count += 1
                 logger.info(f"--- Step {self.step_count} ---")
-                self.context.compact(force=False)
+                # Get max tokens for current provider
+                assert self.provider is not None, "Controller.provider must be initialized before running a turn"
+                self.context.compact(max_tokens=self.provider.entry.context_window, force=False)
                 messages = self.context.to_openai()
                 tools = self.registry.schemas()
                 if not self.provider:
                     return "Error: no provider"
                 # KeyboardInterrupt propagates upward to be handled by the CLI layer.
-                response = self.provider.chat(messages, tools, self.cfg.agent.temperature)
+                try:
+                    response = self.provider.chat(messages, tools, self.cfg.agent.temperature)
+                except Exception as e:
+                    sys.stdout.write(f"\n⚠️  LLM call failed after retries: {e}\n")
+                    sys.stdout.flush()
+                    return f"Error: LLM call failed — {e}"
                 content = response.get("content", "")
                 tool_calls = response.get("tool_calls", [])
                 finish = response.get("finish_reason", "")
@@ -1159,12 +1202,24 @@ class Controller:
                         # execute_gated blocks writers when plan_mode is on.
                         result = self.registry.execute_gated(tname, self, args)
                         self.context.add_tool_result(tname, tid, result)
-                        
+
                         def format_args(args_dict):
                             try:
-                                return json.dumps(args_dict, ensure_ascii=False, indent=2)
+                                # Recursively truncate strings in dictionary
+                                def truncate(v):
+                                    if isinstance(v, str) and len(v) > 50:
+                                        return v[:47] + "..."
+                                    if isinstance(v, dict):
+                                        return {k: truncate(val) for k, val in v.items()}
+                                    if isinstance(v, list):
+                                        return [truncate(val) for val in v]
+                                    return v
+
+                                truncated = truncate(args_dict)
+                                s = json.dumps(truncated, ensure_ascii=False)
+                                return s[:200] + "..." if len(s) > 200 else s
                             except:
-                                return str(args_dict)
+                                return str(args_dict)[:200]
 
                         call_str = f"call: {tname}\nargs: {format_args(args)}"
                         res_str = f"result:\n{result[:600]}"
@@ -1214,6 +1269,15 @@ class Controller:
 
         # ── Approved: exit plan mode and execute ──────────────────────────────
         _stdout("\n\u2705 Plan approved \u2014 executing...")
+
+        # Execute any pending writes queued during plan mode
+        pending = getattr(self.context, "pending_writes", [])
+        if pending:
+            _stdout(f"\n\u2699 Executing {len(pending)} queued write operations...")
+            for tool, args in pending:
+                _stdout(f"  Running {tool.name()} on {args.get('path', 'unknown')}...")
+                tool.execute(self, args)
+
         self.set_plan_mode(False)
 
         # Seed a starter todo list from the plan (mirrors seedPlanTodos).
@@ -1233,63 +1297,29 @@ class Controller:
 
 
 def _read_input_auto(timeout: float = 0.08) -> str:
-    import queue
-    import threading
+    """Read user input using prompt_toolkit. Supports multiline via Alt+Enter."""
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.key_binding import KeyBindings
 
-    if not hasattr(_read_input_auto, "_queue"):
-        q: queue.Queue = queue.Queue()
-        ready = threading.Event()
-        _read_input_auto._queue = q
-        _read_input_auto._prompt_holder = [""]
-        _read_input_auto._ready = ready
+    if not hasattr(_read_input_auto, "_session"):
+        bindings = KeyBindings()
 
-        def _reader() -> None:
-            while True:
-                _read_input_auto._ready.wait()
-                prompt = _read_input_auto._prompt_holder[0]
-                _read_input_auto._ready.clear()
-                try:
-                    q.put(input(prompt))
-                except EOFError:
-                    q.put(None)
-                    break
-                except KeyboardInterrupt:
-                    q.put("")
-                    _stdout("\n")  # New line for visual clean-up
+        @bindings.add("escape", "enter")
+        def _newline(event):
+            event.current_buffer.insert_text("\n")
 
-        threading.Thread(target=_reader, daemon=True).start()
-
-    q = _read_input_auto._queue
-    _read_input_auto._prompt_holder[0] = "> "
-    _read_input_auto._ready.set()
-
-    first = q.get()
-    if first is None:
-        raise EOFError()
-
-    # Check if first is empty due to interruption
-    if first == "":
-        return ""
-
-    lines = [first]
+        _read_input_auto._session = PromptSession(key_bindings=bindings, multiline=False)  # Enter submits; Alt+Enter for newline
 
     if not sys.stdin.isatty():
-        return first
+        # Non-interactive fallback
+        line = sys.stdin.readline()
+        if not line:
+            raise EOFError()
+        return line.rstrip("\n")
 
-    while True:
-        try:
-            line = q.get(timeout=timeout)
-            if line is None:
-                break
-            lines.append(line)
-        except queue.Empty:
-            break
-        except KeyboardInterrupt:
-            # Handle Ctrl+C mid-input as a request to cancel, return an empty string
-            _stdout("\n")
-            return ""
-
-    return "\n".join(lines)
+    session = _read_input_auto._session
+    result = session.prompt("▶ ")
+    return result
 
 
 COMMANDS_HELP = """
@@ -1303,8 +1333,9 @@ Harness Command Help
 /plan on               — Enable plan mode
 /plan off              — Disable plan mode (unlocks write operations)
 /plan status           — Check current plan mode status
-Ctrl-C                 — Cancel current request (retains context)
+Ctrl-C                 — Cancel and exit
 Ctrl-D / EOF           — Exit (automatically saves session)
+/exit, /quit           — Exit (automatically saves session)
 ────────────────────────────────────────────────────────────────────────────────
 """
 
@@ -1330,8 +1361,6 @@ def main(argv=None) -> None:
             default = next((p for p in ctrl.cfg.providers if p.default), ctrl.cfg.providers[0])
             ctrl.provider = Provider(default)
             log_box("boot", f"Resumed session: {args.resume}\nWorkspace: {ctrl.root}\nMessages: {len(ctrl.context.messages)}")
-            if not args.request:
-                _stdout(COMMANDS_HELP)
         else:
             _stdout(f"Session '{args.resume}' not found. Starting fresh.")
             ctrl.boot()
@@ -1348,18 +1377,17 @@ def main(argv=None) -> None:
                 req = _read_input_auto()
                 if not req:
                     continue
-            except EOFError:
+            except (EOFError, KeyboardInterrupt):
                 _stdout("")
                 break
-            except KeyboardInterrupt:
-                _stdout("")
-                continue
             req = req.strip()
             if not req:
                 continue
             if req in ("/help", "?"):
                 _stdout(COMMANDS_HELP)
                 continue
+            if req in ("/exit", "/quit"):
+                break
             if req in ("/new", "/clear"):
                 sid = ctrl.save_session()
                 ctrl.reset_context()
@@ -1372,19 +1400,29 @@ def main(argv=None) -> None:
                 else:
                     _stdout(ctrl.switch_provider(parts[1]))
                 continue
+            if req == "/context":
+                if ctrl.context:
+                    # 获取即将发送给 LLM 的数据结构
+                    messages = ctrl.context.to_openai()
+                    tools = ctrl.registry.schemas()
+                    payload = {"model": ctrl.provider.entry.model if ctrl.provider else "default", "messages": messages, "tools": tools, "temperature": ctrl.cfg.agent.temperature, "todos": ctrl.context.todos}
+                    _stdout("\n--- Simulated LLM Request Payload ---")
+                    _stdout(json.dumps(payload, indent=2, ensure_ascii=False))
+                    _stdout("-------------------------------------\n")
+                else:
+                    _stdout("Context is empty.")
+                continue
             if req == "/skills":
-                skills_list = "\n".join([f"/{s.name} — {s.description}" for s in ctrl.cfg.enabled_skills()])
-                _stdout(f"Available skills:\n{skills_list}")
+                _stdout(f"Available skills:\n" + "\n".join([f"/{s.name} — {s.description}" for s in ctrl.cfg.enabled_skills()]))
                 continue
             if req.startswith("/") and ctrl.cfg.get_skill(req[1:].split()[0]):
-                skill_name = req[1:].split()[0]
-                skill_args = req[1:].split()[1:]
+                skill_name, *skill_args = req[1:].split()
                 skill = ctrl.cfg.get_skill(skill_name)
                 _stdout(f"Triggering skill: {skill_name} with args: {skill_args}")
                 # 实际执行逻辑：将 skill.body 和参数注入到 context 中进行对话
                 ctrl.context.add_user(f"Execute skill {skill_name} with args: {' '.join(skill_args)}\n\nSkill directory: {skill.path}\n\nSkill definition:\n{skill.body}")
                 _stdout("")
-                rich_print(ctrl.run('Proceed with this skill execution'))
+                rich_print(ctrl.run("Proceed with this skill execution"))
                 _stdout("")
                 continue
             if req == "/plan" or req.startswith("/plan "):
@@ -1408,8 +1446,8 @@ def main(argv=None) -> None:
                 rich_print(ctrl.run(req))
                 _stdout("")
             except KeyboardInterrupt:
-                _stdout("\n\n⚠️  Cancelled (Ctrl+C). Context retained, feel free to send new requests.")
-                continue
+                _stdout("\n\n⚠️  Cancelled (Ctrl+C). Exiting.")
+                break
         sid = ctrl.save_session()
         _stdout(f"\nSession saved. Resume with: --resume {sid}")
 

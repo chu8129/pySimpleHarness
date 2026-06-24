@@ -9,7 +9,7 @@ providers:
     model: us.anthropic.claude-sonnet-4-6
     api_key_env: BEDROCK_API_KEY
     context_window: 8192
-    request_timeout: 120
+    request_timeout: 60
     retry_time: 3
     delay: 0.3
 
@@ -19,7 +19,7 @@ providers:
     model: kimi-k2.6
     api_key_env: KIMI_API_KEY
     context_window: 32678
-    request_timeout: 120
+    request_timeout: 60
     retry_time: 3
     delay: 0.3
 
@@ -29,7 +29,7 @@ providers:
     model: minimax-m3
     api_key_env: BAI_API_KEY
     context_window: 32678
-    request_timeout: 120
+    request_timeout: 60
     retry_time: 3
     delay: 0.3
 
@@ -40,9 +40,9 @@ providers:
     model: gemini/gemini-3.1-flash-lite
     api_key_env: GEMINI_API_KEY
     context_window: 65536
-    request_timeout: 120
-    retry_time: 3
-    delay: 1
+    request_timeout: 60
+    retry_time: 5
+    delay: 2
 
 # Agent 行为配置
 agent:
@@ -193,6 +193,7 @@ agent:
     and switch whenever they switch. Let this also guide the language you think in.
     Always keep code, identifiers, file paths, shell commands, and technical terms
     in their original form — never translate them.
+    otherwise, python path: ~/.env/bin/activate
   max_steps: 0                         # 最大执行步数 (0=无限制)
   planner_max_steps: 12                # Planner 最大步数
   temperature: 1.0                     # LLM 温度
