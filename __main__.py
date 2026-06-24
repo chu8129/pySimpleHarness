@@ -131,6 +131,7 @@ class SkillEntry(BaseModel):
     name: str
     description: str = ""
     body: str = ""
+    path: str = ""  # skill directory path, so model knows where to find scripts/references
     allowed_tools: List[str] = Field(default_factory=list)
     run_as: str = "subagent"  # "subagent" | "inline"
 
@@ -165,12 +166,34 @@ class Config(BaseModel):
 
         # 4. Load skills from separate skills.yaml
         skills_yaml = Path(workspace_root) / "skills.yaml"
+        all_skills = []
         if skills_yaml.exists():
             with open(skills_yaml, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
-                cfg._skills_data = [SkillEntry.model_validate(s) for s in data.get("skills", [])]
-        else:
-            cfg._skills_data = []
+                all_skills.extend([SkillEntry.model_validate(s) for s in data.get("skills", [])])
+        
+        # Also load dynamic skills from ./skills directory (each has SKILL.md)
+        skills_dir = Path(workspace_root) / "skills"
+        if skills_dir.exists():
+            for s_dir in skills_dir.iterdir():
+                if not s_dir.is_dir():
+                    continue
+                md_path = s_dir / "SKILL.md"
+                if not md_path.exists():
+                    continue
+                content = md_path.read_text(encoding='utf-8')
+                data = {'name': s_dir.name, 'body': content, 'path': str(s_dir.resolve())}
+                # Parse YAML frontmatter (between --- delimiters)
+                if content.startswith('---'):
+                    parts = content.split('---', 2)
+                    if len(parts) >= 3:
+                        fm = yaml.safe_load(parts[1]) or {}
+                        if isinstance(fm, dict):
+                            data['name'] = fm.get('name', s_dir.name)
+                            data['description'] = fm.get('description', '')
+                all_skills.append(SkillEntry.model_validate(data))
+        
+        cfg._skills_data = all_skills
 
         return cfg
 
@@ -1352,7 +1375,7 @@ def main(argv=None) -> None:
                 skill = ctrl.cfg.get_skill(skill_name)
                 _stdout(f"Triggering skill: {skill_name} with args: {skill_args}")
                 # 实际执行逻辑：将 skill.body 和参数注入到 context 中进行对话
-                ctrl.context.add_user(f"Execute skill {skill_name} with args: {' '.join(skill_args)}\n\nSkill definition:\n{skill.body}")
+                ctrl.context.add_user(f"Execute skill {skill_name} with args: {' '.join(skill_args)}\n\nSkill directory: {skill.path}\n\nSkill definition:\n{skill.body}")
                 _stdout("")
                 rich_print(ctrl.run('Proceed with this skill execution'))
                 _stdout("")
