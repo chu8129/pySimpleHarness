@@ -259,10 +259,10 @@ def log_box(category: str, text: str, max_width: int = 0) -> None:
     if max_width > 0:
         lines = [l[:max_width] for l in lines]
     width = max(len(label) + 2, max(len(l) for l in lines) + 2, 40)
-    logger.info(f"┌─ {label} {'─' * (width - len(label) - 3)}")
+    _stdout(f"┌─ {label} {'─' * (width - len(label) - 3)}")
     for l in lines:
-        logger.info(f"{bar} {l}")
-    logger.info(f"└{'─' * (width)}")
+        _stdout(f"{bar} {l}")
+    _stdout(f"└{'─' * (width)}")
 
 
 # =============================================================================
