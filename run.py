@@ -20,34 +20,25 @@ Usage Example:
 """
 
 from __future__ import annotations
+# =============================================================================
+# Imports
+# =============================================================================
 import os
 import sys
 import json
-
-
-def _load_dotenv(env_file: str = ".env") -> None:
-    """Load environment variables from .env file."""
-    try:
-        from dotenv import load_dotenv
-
-        load_dotenv(env_file, override=False)
-    except ImportError:
-        raise ImportError("Required dependency 'python-dotenv' is missing. Please install it with: pip install python-dotenv")
-
-
 import re
 import glob
 import subprocess
 import readline
-from abc import ABC, abstractmethod
-from typing import Any, Optional, List, Dict
-from typing import List as TypingList  # noqa: F401
-from enum import Enum
-from pathlib import Path
 import urllib.request
 import logging
-
-logger = logging
+from abc import ABC, abstractmethod
+from typing import Any, Optional, List, Dict
+from typing import List as TypingList
+from enum import Enum
+from pathlib import Path
+from rich.console import Console
+from rich.markdown import Markdown
 
 # =============================================================================
 # Dependencies
@@ -61,9 +52,26 @@ except ImportError as e:
     raise ImportError(f"Required dependencies missing: {e}. Install: pip install pyyaml loguru tenacity")
 
 
-# =============================================================================
-# 1. Pydantic Configuration Models (loaded from YAML)
-# =============================================================================
+from rich.console import Console
+from rich.markdown import Markdown
+
+# 初始化 rich console
+console = Console()
+
+def rich_print(text: str):
+    console.print(Markdown(text))
+
+def _load_dotenv(env_file: str = ".env") -> None:
+    """Load environment variables from .env file."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(env_file, override=False)
+    except ImportError:
+        raise ImportError("Required dependency 'python-dotenv' is missing. Please install it with: pip install python-dotenv")
+
+def _stdout(msg: str):
+    sys.stdout.write(msg + "\n")
+    sys.stdout.flush()
 
 
 class AgentConfig(BaseModel):
@@ -231,11 +239,6 @@ class Config(BaseModel):
         if not self.skills.enabled:
             return self.skills_data
         return [s for s in self.skills_data if s.name in self.skills.enabled]
-
-
-def _stdout(msg: str):
-    sys.stdout.write(msg + "\n")
-    sys.stdout.flush()
 
 
 # =============================================================================
@@ -1311,7 +1314,8 @@ def main(argv=None) -> None:
         ctrl.boot()
 
     if args.request:
-        _stdout(f"\n=== Result ===\n{ctrl.run(args.request)}")
+        _stdout(f"\n=== Result ===")
+        rich_print(ctrl.run(args.request))
     else:
         _stdout(COMMANDS_HELP)
         while True:
@@ -1354,7 +1358,9 @@ def main(argv=None) -> None:
                 _stdout(f"Triggering skill: {skill_name} with args: {skill_args}")
                 # 实际执行逻辑：将 skill.body 和参数注入到 context 中进行对话
                 ctrl.context.add_user(f"Execute skill {skill_name} with args: {' '.join(skill_args)}\n\nSkill definition:\n{skill.body}")
-                _stdout(f"\n{ctrl.run('Proceed with this skill execution')}\n")
+                _stdout("")
+                rich_print(ctrl.run('Proceed with this skill execution'))
+                _stdout("")
                 continue
             if req == "/plan" or req.startswith("/plan "):
                 parts = req.split(None, 1)
@@ -1373,7 +1379,9 @@ def main(argv=None) -> None:
                     _stdout("  Use /plan off to cancel without sending a request.")
                 continue
             try:
-                _stdout(f"\n{ctrl.run(req)}\n")
+                _stdout("")
+                rich_print(ctrl.run(req))
+                _stdout("")
             except KeyboardInterrupt:
                 _stdout("\n\n⚠️  Cancelled (Ctrl+C). Context retained, feel free to send new requests.")
                 continue
