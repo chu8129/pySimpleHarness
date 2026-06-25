@@ -51,7 +51,6 @@ providers:
     request_timeout: 60
     retry_time: 5
     delay: 2
-    default: true
 
   - name: mota
     kind: openai
@@ -62,6 +61,17 @@ providers:
     request_timeout: 60
     retry_time: 5
     delay: 2
+
+  - name: zhipu
+    kind: openai
+    base_url: https://open.bigmodel.cn/api/paas/v4
+    model: openai/glm-5.2
+    api_key_env: ZHIPU_API_KEY
+    context_window: 65536
+    request_timeout: 60
+    retry_time: 5
+    delay: 2
+    default: true
 
 # Agent 行为配置
 agent:
