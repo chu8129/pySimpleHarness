@@ -1074,7 +1074,8 @@ class Controller:
         self.context = Context(system_prompt, self.cfg.agent)
 
         _cmd = " ".join(getattr(sys, "orig_argv", sys.argv))
-        self.context.add_user(f"System initialized. Service started with command: `{_cmd}`")
+        system_info = f"\nSystem Info: Platform={sys.platform}, Python={sys.version.split()[0]}"
+        self.context.add_user(f"System initialized. Service started with command: `{_cmd}`{system_info}")
 
         log_box("boot", f"Workspace: {self.root}\nTools: {[t.name() for t in self.registry.list()]}\nSkills: {[s.name for s in self.cfg.enabled_skills()]}\nProvider: {self.provider.entry.name}\nModel: {self.provider.entry.model}\nBase URL: {self.provider.entry.base_url}")
 
