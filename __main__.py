@@ -26,7 +26,7 @@ from __future__ import annotations
 # =============================================================================
 import os
 
-os.environ["LITELLM_SKIP_HTTP_REQUESTS"] = "True"
+os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 import sys
 import json
 import re

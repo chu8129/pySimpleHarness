@@ -222,7 +222,6 @@ agent:
   subagent_model: ""                   # 子代理模型
   subagent_models: {}                  # 按技能指定模型
   output_style: ""                     # 输出风格
-  soft_compact_ratio: 0.5              # 软压缩阈值
   compact_ratio: 0.8                   # 压缩阈值
   compact_force_ratio: 0.9             # 强制压缩阈值
 
