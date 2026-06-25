@@ -25,12 +25,16 @@ from __future__ import annotations
 # Imports
 # =============================================================================
 import os
+
+os.environ["LITELLM_SKIP_HTTP_REQUESTS"] = "True"
 import sys
 import json
 import re
 import glob
 import subprocess
-import readline
+
+if sys.platform != "win32":
+    import readline
 import urllib.request
 import logging
 import yaml
@@ -1193,7 +1197,7 @@ class Controller:
 
                         call_str = f"call: {tname}\nargs: {format_args(args)}"
                         res_str = f"result:\n{result[:600]}"
-                        log_box("tool", f"{call_str}\n{'\u2500' * 36}\n{res_str}")
+                        log_box("tool", f"{call_str}\n{'-' * 36}\n{res_str}")
                 else:
                     return content or "(no response)"
                 if finish == "stop":
@@ -1383,7 +1387,7 @@ def main(argv=None) -> None:
                     _stdout("Context is empty.")
                 continue
             if req == "/skills":
-                _stdout(f"Available skills:\n" + "\n".join([f"/{s.name} — {s.description}" for s in ctrl.cfg.enabled_skills()]))
+                _stdout(f"Available skills:\n" + "\n".join([f"/{s.name} — {s.description[:47] + '...' if len(s.description) > 50 else s.description}" for s in ctrl.cfg.enabled_skills()]))
                 continue
             if req.startswith("/") and ctrl.cfg.get_skill(req[1:].split()[0]):
                 skill_name, *skill_args = req[1:].split()
