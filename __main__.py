@@ -32,6 +32,7 @@ import json
 import re
 import glob
 import subprocess
+import signal
 
 if sys.platform != "win32":
     import readline
@@ -46,8 +47,8 @@ from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.panel import Panel
 
-# Initialize console
 console = Console()
 
 
@@ -268,12 +269,6 @@ _LOG_STYLES = {
 }
 
 
-from rich.panel import Panel
-from rich.console import Console
-
-# Initialize console (already defined at top of file)
-
-
 def log_box(category: str, text: str, max_width: int = 0) -> None:
     """Print text in a styled box using rich.panel."""
     style = _LOG_STYLES.get(category, (category.upper(), "│"))
@@ -438,6 +433,7 @@ class MultiEditTool(Tool):
 class BashTool(Tool):
     def __init__(self, prefer="auto", path="", timeout=120):
         self.prefer, self.path, self.timeout = prefer, path, timeout
+        self.active_processes = []
 
     def name(self):
         return "bash"
@@ -452,19 +448,36 @@ class BashTool(Tool):
         return False
 
     def execute(self, ctx, args):
+        proc = subprocess.Popen(args["command"], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, executable=self.path or None)
+        self.active_processes.append(proc)
         try:
-            result = subprocess.run(args["command"], shell=True, capture_output=True, text=True, timeout=self.timeout, executable=self.path or None)
-            out = result.stdout
-            if result.returncode != 0:
-                logger.error(f"Bash command failed: {args['command']}\n{result.stderr}")
-                out += f"\n[exit {result.returncode}]\n{result.stderr}"
+            stdout, stderr = proc.communicate(timeout=self.timeout)
+            if proc in self.active_processes:
+                self.active_processes.remove(proc)
+            out = stdout
+            if proc.returncode != 0:
+                logger.error(f"Bash command failed: {args['command']}\n{stderr}")
+                out += f"\n[exit {proc.returncode}]\n{stderr}"
             return out or "(no output)"
         except subprocess.TimeoutExpired:
+            proc.kill()
+            if proc in self.active_processes:
+                self.active_processes.remove(proc)
             logger.error(f"Bash command timed out: {args['command']}")
             return f"Error: timed out after {self.timeout}s"
-        except Exception as e:
-            logger.error(f"Bash command error: {args['command']}: {e}")
-            return f"Error: {e}"
+        except KeyboardInterrupt:
+            proc.kill()
+            if proc in self.active_processes:
+                self.active_processes.remove(proc)
+            raise
+
+    def __del__(self):
+        for proc in self.active_processes:
+            try:
+                proc.kill()
+            except:
+                pass
+        self.active_processes = []
 
 
 class GrepTool(Tool):
@@ -925,64 +938,59 @@ class Provider:
         self.entry = entry
         self.api_key = os.environ.get(entry.api_key_env, "") or entry.api_key_env
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type((Exception,)), before_sleep=lambda retry_state: logger.warning(f"Retrying LLM call: attempt {retry_state.attempt_number}..."))
     def chat(self, messages: List[dict], tools: List[dict], temperature: float = 0.0) -> dict:
         """Send request to LLM using litellm (supporting OpenAI/Gemini/Anthropic, etc.)."""
         from litellm import completion, exceptions
         import time
+        from concurrent.futures import ThreadPoolExecutor
 
         # Apply delay if configured
         if self.entry.delay_seconds > 0:
             logger.info(f"Delaying {self.entry.delay_seconds}s before request...")
             time.sleep(self.entry.delay_seconds)
 
-        # Define retry capture logic
-        def is_retryable(ex):
-            return isinstance(
-                ex,
-                (
-                    exceptions.RateLimitError,
-                    exceptions.ServiceUnavailableError,
-                    exceptions.APIError,
-                    exceptions.Timeout,
-                ),
-            )
+        def _call():
+            kwargs = {
+                "model": self.entry.model,
+                "messages": messages,
+                "temperature": temperature,
+                "timeout": self.entry.request_timeout,
+                "api_key": self.api_key,
+            }
+            if tools:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = "auto"
+            if self.entry.base_url:
+                kwargs["api_base"] = self.entry.base_url
+            return completion(**kwargs)
 
-        kwargs = {
-            "model": self.entry.model,
-            "messages": messages,
-            "temperature": temperature,
-            "timeout": self.entry.request_timeout,
-            "api_key": self.api_key,
-        }
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
-        if self.entry.base_url:
-            kwargs["api_base"] = self.entry.base_url
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_call)
+            try:
+                response = future.result()
+            except KeyboardInterrupt:
+                future.cancel()
+                logger.warning("LLM call interrupted by user.")
+                return {"content": "(Interrupted by user)", "tool_calls": [], "finish_reason": "interrupted"}
+            except exceptions.RateLimitError as e:
+                logger.error(f"Rate limit exceeded: {e}")
+                return {"content": "Error: API Rate Limit Exceeded. Please wait a moment and try again.", "tool_calls": [], "finish_reason": "error"}
+            except exceptions.AuthenticationError as e:
+                logger.error(f"Authentication failed: {e}")
+                return {"content": "Error: Authentication failed. Check your API key.", "tool_calls": [], "finish_reason": "error"}
+            except exceptions.ServiceUnavailableError as e:
+                logger.error(f"Service Unavailable: {e}")
+                return {"content": "Error: Service is currently unavailable (e.g. high load). Please try again in a few moments.", "tool_calls": [], "finish_reason": "error"}
+            except Exception as e:
+                logger.error(f"LLM call error: {e}")
+                return {"content": f"Error: {e}", "tool_calls": [], "finish_reason": "error"}
 
-        try:
-            response = completion(**kwargs)
-            choice = response.choices[0]
-            msg = choice.message
-            tool_calls = []
-            if msg.tool_calls:
-                tool_calls = [{"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}} for tc in msg.tool_calls]
-            return {"content": msg.content or "", "tool_calls": tool_calls, "finish_reason": choice.finish_reason or ""}
-        except exceptions.RateLimitError as e:
-            logger.error(f"Rate limit exceeded: {e}")
-            return {"content": "Error: API Rate Limit Exceeded. Please wait a moment and try again.", "tool_calls": [], "finish_reason": "error"}
-        except exceptions.AuthenticationError as e:
-            logger.error(f"Authentication failed: {e}")
-            return {"content": "Error: Authentication failed. Check your API key.", "tool_calls": [], "finish_reason": "error"}
-        except exceptions.ServiceUnavailableError as e:
-            logger.error(f"Service Unavailable: {e}")
-            return {"content": "Error: Service is currently unavailable (e.g. high load). Please try again in a few moments.", "tool_calls": [], "finish_reason": "error"}
-        except Exception as e:
-            if is_retryable(e):
-                raise  # Trigger tenacity retry
-            logger.error(f"LLM call error: {e}")
-            return {"content": f"Error: {e}", "tool_calls": [], "finish_reason": "error"}
+        choice = response.choices[0]
+        msg = choice.message
+        tool_calls = []
+        if msg.tool_calls:
+            tool_calls = [{"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}} for tc in msg.tool_calls]
+        return {"content": msg.content or "", "tool_calls": tool_calls, "finish_reason": choice.finish_reason or ""}
 
 
 # =============================================================================
@@ -1159,6 +1167,9 @@ class Controller:
                 # KeyboardInterrupt propagates upward to be handled by the CLI layer.
                 try:
                     response = self.provider.chat(messages, tools, self.cfg.agent.temperature)
+                except KeyboardInterrupt:
+                    logger.warning("\nInterrupted by user during LLM call.")
+                    raise
                 except Exception as e:
                     sys.stdout.write(f"\n⚠️  LLM call failed after retries: {e}\n")
                     sys.stdout.flush()
