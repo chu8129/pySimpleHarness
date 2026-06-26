@@ -263,22 +263,36 @@ _LOG_STYLES = {
     "model": ("🤖 MODEL", "│"),
     "tool": ("🔧 TOOL", "│"),
     "mcp": ("🌐 MCP", "│"),
-    "boot": ("⚙️  BOOT", "│"),
+    "boot": ("🚀 SYSTEM STARTUP", "║"),
 }
 
 
+from rich.panel import Panel
+from rich.console import Console
+
+# Initialize console (already defined at top of file)
+
+
 def log_box(category: str, text: str, max_width: int = 0) -> None:
-    """Print text in a left-bordered box with category label."""
+    """Print text in a styled box using rich.panel."""
     style = _LOG_STYLES.get(category, (category.upper(), "│"))
-    label, bar = style
-    lines = text.splitlines() or [""]
-    if max_width > 0:
-        lines = [l[:max_width] for l in lines]
-    width = max(len(label) + 2, max(len(l) for l in lines) + 2, 40)
-    _stdout(f"┌─ {label} {'─' * (width - len(label) - 3)}")
-    for l in lines:
-        _stdout(f"{bar} {l}")
-    _stdout(f"└{'─' * (width)}")
+    label, _ = style
+
+    # 格式化列表内容：将长字符串（如 Tools/Skills 列表）转换为换行显示
+    if category == "boot":
+        formatted_text = text.replace("],", "],\n").replace(", ", "\n  ")
+    else:
+        formatted_text = text
+
+    # Create the panel
+    panel = Panel(
+        formatted_text,
+        title=f"[bold]{label}[/bold]",
+        subtitle=None,
+        border_style="blue" if category != "boot" else "green",
+        expand=False,
+    )
+    console.print(panel)
 
 
 # =============================================================================
@@ -1295,22 +1309,27 @@ def _read_input_auto(timeout: float = 0.08) -> str:
     return result
 
 
-COMMANDS_HELP = """
-Harness Command Help
-────────────────────────────────────────────────────────────────────────────────
-/new                   — Start a new conversation (automatically saves the current session)
-/clear                 — Same as /new, clears the current conversation context
-/model                 — List all available providers
-/model <name or index> — Switch to the specified provider (supports name or list index)
-/plan                  — Enable plan mode (next request will be planned first, then await confirmation)
-/plan on               — Enable plan mode
-/plan off              — Disable plan mode (unlocks write operations)
-/plan status           — Check current plan mode status
-Ctrl-C                 — Cancel and exit
-Ctrl-D / EOF           — Exit (automatically saves session)
-/exit, /quit           — Exit (automatically saves session)
-────────────────────────────────────────────────────────────────────────────────
-"""
+def print_help():
+    from rich.panel import Panel
+    from rich.table import Table
+
+    table = Table(show_header=False, box=None)
+    table.add_column("Command")
+    table.add_column("Description")
+    table.add_row("COMMAND", "DESCRIPTION")
+    table.add_row("──────────────────────────", "──────────────────────────────────────────────────────────────────────────")
+    table.add_row("/new", "Start a new conversation (automatically saves the current session)")
+    table.add_row("/clear", "Same as /new, clears the current conversation context")
+    table.add_row("/model", "List all available providers")
+    table.add_row("/model <name/idx>", "Switch to the specified provider (supports name or list index)")
+    table.add_row("/plan", "Enable plan mode (next request will be planned first, then await confirmation)")
+    table.add_row("/plan on", "Enable plan mode")
+    table.add_row("/plan off", "Disable plan mode (unlocks write operations)")
+    table.add_row("/plan status", "Check current plan mode status")
+    table.add_row("Ctrl-C", "Cancel and exit")
+    table.add_row("Ctrl-D / EOF", "Exit (automatically saves session)")
+    table.add_row("/exit, /quit", "Exit (automatically saves session)")
+    console.print(Panel(table, title="[bold blue]Harness Command Help[/bold blue]", expand=False, border_style="blue"))
 
 
 def main(argv=None) -> None:
@@ -1344,7 +1363,7 @@ def main(argv=None) -> None:
         _stdout(f"\n=== Result ===")
         rich_print(ctrl.run(args.request))
     else:
-        _stdout(COMMANDS_HELP)
+        print_help()
         while True:
             try:
                 req = _read_input_auto()
@@ -1357,7 +1376,7 @@ def main(argv=None) -> None:
             if not req:
                 continue
             if req in ("/help", "?"):
-                _stdout(COMMANDS_HELP)
+                print_help()
                 continue
             if req in ("/exit", "/quit"):
                 break
