@@ -1336,6 +1336,7 @@ COMMANDS
   /plan status      Check current plan mode status
   /context          Display current context and LLM request payload
   /exit, /quit      Exit (automatically saves session)
+  q                 Exit (same as /quit)
 
 INTERRUPTS
   Ctrl-C            Cancel the current operation
@@ -1391,6 +1392,8 @@ def main(argv=None) -> None:
                 print_help()
                 continue
             if req in ("/exit", "/quit"):
+                break
+            if req == "q":
                 break
             if req in ("/new", "/clear"):
                 sid = ctrl.save_session()
