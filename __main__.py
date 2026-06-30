@@ -549,6 +549,10 @@ class LsTool(Tool):
         return "\n".join(f"{'d' if e.is_dir() else 'f'} {e.name}" for e in sorted(p.iterdir())) if p.exists() else f"Error: not found {p}"
 
 
+import socket
+import ipaddress
+
+
 class WebFetchTool(Tool):
     def __init__(self, proxy=None):
         self.proxy = proxy
@@ -557,7 +561,7 @@ class WebFetchTool(Tool):
         return "web_fetch"
 
     def description(self):
-        return "Fetch content from a URL."
+        return "Fetch content from a URL with SSRF protection."
 
     def schema(self):
         return {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
@@ -565,9 +569,24 @@ class WebFetchTool(Tool):
     def read_only(self):
         return True
 
+    def _is_safe_ip(self, ip_str: str) -> bool:
+        try:
+            ip = ipaddress.ip_address(ip_str)
+            return not (ip.is_private or ip.is_loopback or ip.is_multicast or ip.is_link_local or ip.is_reserved or ip.is_unspecified)
+        except:
+            return False
+
     def execute(self, ctx, args):
         try:
-            req = urllib.request.Request(args["url"], headers={"User-Agent": "Harness/1.0"})
+            url = args["url"]
+            parsed = urllib.parse.urlparse(url)
+            hostname = parsed.hostname
+
+            ip = socket.gethostbyname(hostname)
+            if not self._is_safe_ip(ip):
+                return f"Error: Security policy violation - cannot fetch internal address {ip}"
+
+            req = urllib.request.Request(url, headers={"User-Agent": "Harness/1.0"})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return resp.read().decode("utf-8", errors="replace")
         except Exception as e:
