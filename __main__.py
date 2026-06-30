@@ -571,7 +571,7 @@ class WebFetchTool(SafeTool):
         return "Fetch content from a URL with SSRF protection."
 
     def schema(self):
-        return {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
+        return {"type": "object", "properties": {"url": {"type": "string"}, "headers": {"type": "object", "description": "Optional dictionary of HTTP headers"}}, "required": ["url"]}
 
     def read_only(self):
         return True
@@ -585,6 +585,10 @@ class WebFetchTool(SafeTool):
 
     def __call__(self, ctx, args):
         url = args["url"]
+        headers = args.get("headers", {})
+        if "User-Agent" not in headers:
+            headers["User-Agent"] = "Harness/1.0"
+
         parsed = urllib.parse.urlparse(url)
         hostname = parsed.hostname
 
@@ -592,13 +596,18 @@ class WebFetchTool(SafeTool):
         if not self._is_safe_ip(ip):
             return f"Error: Security policy violation - cannot fetch internal address {ip}"
 
-        req = urllib.request.Request(url, headers={"User-Agent": "Harness/1.0"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = resp.read()
-            try:
-                return data.decode("utf-8")
-            except UnicodeDecodeError:
-                return data.decode("utf-8", errors="replace")
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read()
+                try:
+                    return data.decode("utf-8")
+                except UnicodeDecodeError:
+                    return data.decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            return f"Error: Tool execution failed - HTTP Error {e.code}: {e.reason}"
+        except Exception as e:
+            raise RuntimeError(f"Error: Tool execution failed - {str(e)}")
 
 
 class AskTool(SafeTool):
@@ -649,6 +658,49 @@ class TodoWriteTool(SafeTool):
             todo_display = "\n".join([f"  [{t['status']:<11}] {t['content']}" for t in args["todos"]])
             _stdout(f"\n\U0001f4dd TASK PROGRESS:\n{todo_display}\n")
         return f"Updated {len(args['todos'])} todos"
+
+
+class WebSearchTool(SafeTool):
+    def name(self):
+        return "web_search"
+
+    def description(self):
+        return "Search the web using duckduckgo, google, or baidu."
+
+    def schema(self):
+        return {"type": "object", "properties": {"query": {"type": "string"}, "engine": {"type": "string", "enum": ["duckduckgo", "google", "baidu"], "default": "baidu"}, "count": {"type": "integer", "default": 5}}, "required": ["query"]}
+
+    def read_only(self):
+        return True
+
+    def __call__(self, ctx, args):
+        import requests
+
+    def __call__(self, ctx, args):
+        import requests
+        from bs4 import BeautifulSoup
+
+        query, engine = args["query"], args.get("engine", "duckduckgo")
+        configs = {"baidu": ("http://www.baidu.com/s", {"wd": query}, ".c-container"), "duckduckgo": ("https://html.duckduckgo.com/html/", {"q": query}, ".result"), "google": ("https://www.google.com/search", {"q": query}, ".tF2Cxc")}
+
+        if engine not in configs:
+            return f"Unsupported engine: {engine}"
+
+        url, params, selector = configs[engine]
+        headers = {"User-Agent": "Mozilla/5.0"}
+
+        if engine == "duckduckgo":
+            response = requests.post(url, data=params, headers=headers)
+        else:
+            response = requests.get(url, params=params, headers=headers)
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        results = [res.get_text(separator=" ", strip=True) for res in soup.select(selector)]
+
+        if not results and engine == "baidu":
+            return soup.get_text(separator=" ", strip=True)[:2000]
+
+        return "\n---\n".join(results) if results else f"No results found for {engine}."
 
 
 # =============================================================================
@@ -825,7 +877,7 @@ class Registry:
         return tool.execute(ctx, args)
 
 
-ALL_TOOLS = [ReadFileTool, WriteFileTool, EditFileTool, MultiEditTool, BashTool, GrepTool, GlobTool, LsTool, WebFetchTool, AskTool, TodoWriteTool]
+ALL_TOOLS = [ReadFileTool, WriteFileTool, EditFileTool, MultiEditTool, BashTool, GrepTool, GlobTool, LsTool, WebFetchTool, AskTool, TodoWriteTool, WebSearchTool]
 
 
 def register_all_builtins(reg: Registry, cfg: Config, root: str, proxy=None) -> None:
@@ -1122,7 +1174,10 @@ class Controller:
         system_info = f"\nSystem Info: Platform={sys.platform}, Python={sys.version.split()[0]}"
         self.context.add_user(f"System initialized. Service started with command: `{_cmd}`{system_info}")
 
-        log_box("boot", f"Workspace: {self.root}\nTools: {[t.name() for t in self.registry.list()]}\nSkills: {[s.name for s in self.cfg.enabled_skills()]}\nProvider: {self.provider.entry.name}\nModel: {self.provider.entry.model}\nBase URL: {self.provider.entry.base_url}")
+        log_box(
+            "boot",
+            f"Workspace: {self.root}\nTools: {[t.name() for t in self.registry.list()]}\nSkills: {[s.name for s in self.cfg.enabled_skills()]}\nProvider: {self.provider.entry.name}\nModel: {self.provider.entry.model}\nBase URL: {self.provider.entry.base_url}",
+        )
 
     # ------------------------------------------------------------------
     # Plan-mode helpers
@@ -1209,6 +1264,8 @@ class Controller:
                 if tool_calls:
                     tc_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
                     model_parts.append(f"\u2192 tools: {', '.join(tc_names)}")
+                    for tc in tool_calls:
+                        model_parts.append(f"  └─ call: {tc.get('function', {}).get('name')}\n     args: {tc.get('function', {}).get('arguments')}")
                 if model_parts:
                     log_box("model", "\n".join(model_parts))
                 self.context.add_assistant(content or "", tool_calls=tool_calls or None)
@@ -1424,7 +1481,13 @@ def main(argv=None) -> None:
         if ctrl.context:
             messages = ctrl.context.to_openai()
             tools = ctrl.registry.schemas()
-            payload = {"model": ctrl.provider.entry.model if ctrl.provider else "default", "messages": messages, "tools": tools, "temperature": ctrl.cfg.agent.temperature, "todos": ctrl.context.todos}
+            payload = {
+                "model": ctrl.provider.entry.model if ctrl.provider else "default",
+                "messages": messages,
+                "tools": tools,
+                "temperature": ctrl.cfg.agent.temperature,
+                "todos": ctrl.context.todos,
+            }
             _stdout("\n--- Simulated LLM Request Payload ---")
             _stdout(json.dumps(payload, indent=2, ensure_ascii=False))
             _stdout("-------------------------------------\n")
