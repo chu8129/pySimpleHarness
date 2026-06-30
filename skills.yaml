@@ -1,9 +1,9 @@
-# Harness 技能配置文件
-# 技能定义: 每个技能是一个独立的子代理或内联工作流
+# Harness Skills Configuration
+# Skill Definition: Each skill is an independent subagent or inline workflow
 
 skills:
   # ============================================
-  # 1. explore - 代码库探索 (只读子代理)
+  # 1. explore - Codebase Exploration (Read-only subagent)
   # ============================================
   - name: explore
     description: Explore the codebase in an isolated subagent — wide-net read-only investigation
@@ -32,7 +32,7 @@ skills:
     run_as: subagent
 
   # ============================================
-  # 2. research - 研究 (外部信息 + 代码阅读)
+  # 2. research - Research (External info + Code reading)
   # ============================================
   - name: research
     description: Research a question by combining web_fetch + code reading in an isolated subagent
@@ -52,7 +52,7 @@ skills:
     run_as: subagent
 
   # ============================================
-  # 3. review - 代码审查 (子代理)
+  # 3. review - Code Review (Subagent)
   # ============================================
   - name: review
     description: Review the pending changes in an isolated subagent
@@ -72,7 +72,7 @@ skills:
     run_as: subagent
 
   # ============================================
-  # 4. test - 测试运行与修复 (内联)
+  # 4. test - Test Execution and Repair (Inline)
   # ============================================
   - name: test
     description: Run the project's test suite, diagnose failures, propose+apply fixes
@@ -93,7 +93,7 @@ skills:
     run_as: inline
 
   # ============================================
-  # 5. doc - 文档生成 (自定义示例)
+  # 5. doc - Documentation Generation
   # ============================================
   - name: doc
     description: Generate documentation for the codebase
@@ -112,7 +112,7 @@ skills:
     run_as: inline
 
   # ============================================
-  # 6. refactor - 代码重构 (自定义示例)
+  # 6. refactor - Code Refactoring
   # ============================================
   - name: refactor
     description: Refactor code for better readability and performance
@@ -130,3 +130,23 @@ skills:
       - List of files modified.
     allowed_tools: [read_file, write_file, edit_file, multi_edit, bash, grep]
     run_as: inline
+
+  # ============================================
+  # 7. memory - Persistence Memory System
+  # ============================================
+  - name: memory
+    description: "Persistent memory system implemented via ./memory.json for storing project state, user preferences, and task progress."
+    body: |
+      ### Memory Operation Protocol
+      When the Agent needs to perform a memory task, follow these steps:
+      1. Initialization: Use `read_file` to read ./memory.json. If the file does not exist, treat it as first-time use.
+      2. Storage: Use `write_file` to write the content in JSON format.
+      3. Structure Suggestion:
+         {
+           "last_task": "Current task description",
+           "status": "Progress status",
+           "preferences": ["preference1", "preference2"],
+           "notes": "Temporary notes"
+         }
+      4. Proactive Behavior: Check before starting complex tasks, and automatically summarize and write after tasks are completed.
+    run_as: "subagent"
