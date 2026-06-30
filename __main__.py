@@ -25,8 +25,10 @@ from __future__ import annotations
 # Imports
 # =============================================================================
 import os
+import socket
 
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+import ipaddress
 import sys
 import json
 import re
@@ -332,7 +334,21 @@ class Tool(ABC):
         }
 
 
-class ReadFileTool(Tool):
+class SafeTool(Tool, ABC):
+    """Base class for tools that wraps execution in a robust error handler."""
+
+    def execute(self, ctx: Any, args: dict) -> str:
+        try:
+            return self(ctx, args)
+        except Exception as e:
+            logger.exception(f"Tool {self.name()} execution failed")
+            return f"Error: Tool execution failed - {str(e)}"
+
+    @abstractmethod
+    def __call__(self, ctx: Any, args: dict) -> str: ...
+
+
+class ReadFileTool(SafeTool):
     def name(self):
         return "read_file"
 
@@ -345,15 +361,11 @@ class ReadFileTool(Tool):
     def read_only(self):
         return True
 
-    def execute(self, ctx, args):
-        try:
-            return Path(args["path"]).read_text(encoding="utf-8")
-        except Exception as e:
-            logger.error(f"Failed to read file: {e}")
-            return f"Error: {e}"
+    def __call__(self, ctx, args):
+        return Path(args["path"]).read_text(encoding="utf-8")
 
 
-class WriteFileTool(Tool):
+class WriteFileTool(SafeTool):
     def name(self):
         return "write_file"
 
@@ -366,7 +378,7 @@ class WriteFileTool(Tool):
     def read_only(self):
         return False
 
-    def execute(self, ctx, args):
+    def __call__(self, ctx, args):
         if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
             return "Error: Permission denied by user."
         path = Path(args["path"])
@@ -375,7 +387,7 @@ class WriteFileTool(Tool):
         return f"Wrote {path} ({len(args['content'])} chars)"
 
 
-class EditFileTool(Tool):
+class EditFileTool(SafeTool):
     def name(self):
         return "edit_file"
 
@@ -388,7 +400,7 @@ class EditFileTool(Tool):
     def read_only(self):
         return False
 
-    def execute(self, ctx, args):
+    def __call__(self, ctx, args):
         if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
             return "Error: Permission denied by user."
         path = Path(args["path"])
@@ -400,7 +412,7 @@ class EditFileTool(Tool):
         return f"Edited {path}"
 
 
-class MultiEditTool(Tool):
+class MultiEditTool(SafeTool):
     def name(self):
         return "multi_edit"
 
@@ -413,7 +425,7 @@ class MultiEditTool(Tool):
     def read_only(self):
         return False
 
-    def execute(self, ctx, args):
+    def __call__(self, ctx, args):
         if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
             return "Error: Permission denied by user."
         path = Path(args["path"])
@@ -427,7 +439,7 @@ class MultiEditTool(Tool):
         return f"Applied {len(args['edits'])} edits to {path}"
 
 
-class BashTool(Tool):
+class BashTool(SafeTool):
     def __init__(self, prefer="auto", path="", timeout=120):
         self.prefer, self.path, self.timeout = prefer, path, timeout
         self.active_processes = []
@@ -444,8 +456,8 @@ class BashTool(Tool):
     def read_only(self):
         return False
 
-    def execute(self, ctx, args):
-        proc = subprocess.Popen(args["command"], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, executable=self.path or None)
+    def __call__(self, ctx, args):
+        proc = subprocess.Popen(args["command"], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", executable=self.path or None)
         self.active_processes.append(proc)
         try:
             stdout, stderr = proc.communicate(timeout=self.timeout)
@@ -477,7 +489,7 @@ class BashTool(Tool):
         self.active_processes = []
 
 
-class GrepTool(Tool):
+class GrepTool(SafeTool):
     def __init__(self, rg_path=""):
         self.rg_path = rg_path
 
@@ -493,28 +505,25 @@ class GrepTool(Tool):
     def read_only(self):
         return True
 
-    def execute(self, ctx, args):
+    def __call__(self, ctx, args):
         pattern, path = args["pattern"], Path(args["path"])
-        try:
-            if self.rg_path and Path(self.rg_path).exists():
-                r = subprocess.run([self.rg_path, "--no-heading", "-n", "--with-filename", pattern, str(path)], capture_output=True, text=True)
-                return r.stdout or "(no matches)"
-            rx = re.compile(pattern)
-            files = [path] if path.is_file() else [p for p in path.rglob("*") if p.is_file()]
-            matches = []
-            for fp in files:
-                try:
-                    for i, line in enumerate(fp.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
-                        if rx.search(line):
-                            matches.append(f"{fp}:{i}:{line}")
-                except Exception:
-                    continue
-            return "\n".join(matches) if matches else "(no matches)"
-        except Exception as e:
-            return f"Error: {e}"
+        if self.rg_path and Path(self.rg_path).exists():
+            r = subprocess.run([self.rg_path, "--no-heading", "-n", "--with-filename", pattern, str(path)], capture_output=True, text=True)
+            return r.stdout or "(no matches)"
+        rx = re.compile(pattern)
+        files = [path] if path.is_file() else [p for p in path.rglob("*") if p.is_file()]
+        matches = []
+        for fp in files:
+            try:
+                for i, line in enumerate(fp.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+                    if rx.search(line):
+                        matches.append(f"{fp}:{i}:{line}")
+            except Exception:
+                continue
+        return "\n".join(matches) if matches else "(no matches)"
 
 
-class GlobTool(Tool):
+class GlobTool(SafeTool):
     def name(self):
         return "glob"
 
@@ -527,11 +536,11 @@ class GlobTool(Tool):
     def read_only(self):
         return True
 
-    def execute(self, ctx, args):
+    def __call__(self, ctx, args):
         return "\n".join(glob.glob(args["pattern"], recursive=True)) or "(no matches)"
 
 
-class LsTool(Tool):
+class LsTool(SafeTool):
     def name(self):
         return "ls"
 
@@ -544,16 +553,14 @@ class LsTool(Tool):
     def read_only(self):
         return True
 
-    def execute(self, ctx, args):
+    def __call__(self, ctx, args):
         p = Path(args["path"])
-        return "\n".join(f"{'d' if e.is_dir() else 'f'} {e.name}" for e in sorted(p.iterdir())) if p.exists() else f"Error: not found {p}"
+        if not p.exists():
+            return f"Error: not found {p}"
+        return "\n".join(f"{'d' if e.is_dir() else 'f'} {e.name}" for e in sorted(p.iterdir()))
 
 
-import socket
-import ipaddress
-
-
-class WebFetchTool(Tool):
+class WebFetchTool(SafeTool):
     def __init__(self, proxy=None):
         self.proxy = proxy
 
@@ -576,24 +583,25 @@ class WebFetchTool(Tool):
         except:
             return False
 
-    def execute(self, ctx, args):
-        try:
-            url = args["url"]
-            parsed = urllib.parse.urlparse(url)
-            hostname = parsed.hostname
+    def __call__(self, ctx, args):
+        url = args["url"]
+        parsed = urllib.parse.urlparse(url)
+        hostname = parsed.hostname
 
-            ip = socket.gethostbyname(hostname)
-            if not self._is_safe_ip(ip):
-                return f"Error: Security policy violation - cannot fetch internal address {ip}"
+        ip = socket.gethostbyname(hostname)
+        if not self._is_safe_ip(ip):
+            return f"Error: Security policy violation - cannot fetch internal address {ip}"
 
-            req = urllib.request.Request(url, headers={"User-Agent": "Harness/1.0"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return resp.read().decode("utf-8", errors="replace")
-        except Exception as e:
-            return f"Error: {e}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Harness/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read()
+            try:
+                return data.decode("utf-8")
+            except UnicodeDecodeError:
+                return data.decode("utf-8", errors="replace")
 
 
-class AskTool(Tool):
+class AskTool(SafeTool):
     def name(self):
         return "ask"
 
@@ -606,7 +614,7 @@ class AskTool(Tool):
     def read_only(self):
         return True
 
-    def execute(self, ctx, args):
+    def __call__(self, ctx, args):
         _stdout(f"\n[ASK] {args['question']}")
         for i, opt in enumerate(args.get("options", []), 1):
             _stdout(f"  {i}. {opt}")
@@ -620,7 +628,7 @@ class AskTool(Tool):
             return "<model-assumption> Proceeding with default."
 
 
-class TodoWriteTool(Tool):
+class TodoWriteTool(SafeTool):
     def name(self):
         return "todo_write"
 
@@ -633,7 +641,7 @@ class TodoWriteTool(Tool):
     def read_only(self):
         return False
 
-    def execute(self, ctx, args):
+    def __call__(self, ctx, args):
         target = ctx.context if hasattr(ctx, "context") else ctx
         if hasattr(target, "todos"):
             target.todos = args["todos"]
