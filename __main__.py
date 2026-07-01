@@ -793,7 +793,6 @@ class PermissionManager:
 class Registry:
     def __init__(self):
         self._tools: Dict[str, Tool] = {}
-        self.plan_mode: bool = False
 
     def add(self, tool: Tool) -> None:
         self._tools[tool.name()] = tool
@@ -805,37 +804,12 @@ class Registry:
         return list(self._tools.values())
 
     def schemas(self) -> List[dict]:
-        if self.plan_mode:
-            return [t.to_dict() for t in self._tools.values() if t.read_only()]
         return [t.to_dict() for t in self._tools.values()]
 
     def execute_gated(self, name: str, ctx: Any, args: dict) -> str:
         tool = self.get(name)
         if tool is None:
             return f"Error: tool '{name}' not found"
-
-        if self.plan_mode and not tool.read_only():
-            approved_writes = getattr(ctx, "approved_writes", set())
-            write_key = f"{name}:{args.get('path', 'unknown')}"
-
-            if write_key not in approved_writes:
-                question = f"Plan mode is ON. Tool '{name}' is a writer (target: {args.get('path', 'unknown')}).\n" f"Allow this write operation?"
-                options = ["Yes", "No (queue for later)"]
-
-                ask_tool = self.get("ask")
-                if ask_tool:
-                    choice = ask_tool.execute(ctx, {"question": question, "options": options})
-                    if choice == "1":
-                        approved_writes.add(write_key)
-                        setattr(ctx, "approved_writes", approved_writes)
-                        return tool.execute(ctx, args)
-                    else:
-                        pending = getattr(ctx, "pending_writes", [])
-                        pending.append((tool, args))
-                        setattr(ctx, "pending_writes", pending)
-                        return f"[plan-mode] Tool '{name}' write blocked and queued for after plan approval."
-                else:
-                    return f"[plan-mode] Writer blocked (no ask tool available)."
 
         # Validate required parameters before execution.
         schema = tool.schema()
@@ -1051,9 +1025,6 @@ class Controller:
         self.perm_manager = PermissionManager()
         self.context: Optional[Context] = None
         self.step_count = 0
-        # Plan-mode state: when True, PlanModeMarker is prepended to outgoing
-        # turns and writer tools are blocked via registry.plan_mode.
-        # Mirrors Harness Controller.planMode / SetPlanMode.
         self._plan_mode: bool = False
 
     def set_plan_mode(self, on: bool) -> None:
@@ -1247,7 +1218,6 @@ class Controller:
                             args = json.loads(fn.get("arguments", "{}")) if isinstance(fn.get("arguments"), str) else fn.get("arguments", {})
                         except json.JSONDecodeError:
                             args = {}
-                        # execute_gated blocks writers when plan_mode is on.
                         result = self.registry.execute_gated(tname, self, args)
                         self.context.add_tool_result(tname, tid, result)
 
@@ -1473,7 +1443,6 @@ def main(argv=None) -> None:
         parts = req.split(None, 1)
         sub = parts[1].strip().lower() if len(parts) > 1 else None
         if sub is None:
-            # Toggle mode
             new_state = not ctrl.plan_mode
             ctrl.set_plan_mode(new_state)
             _stdout(f"Plan mode: {"ON" if new_state else "OFF"}")
