@@ -292,59 +292,6 @@ def log_box(category: str, text: str, max_width: int = 0) -> None:
     console.print(panel)
 
 
-class WriteFileTool(SafeTool):
-    def name(self):
-        return "write_file"
-
-    def description(self):
-        return "Write content to a file. Overwrites if exists (Python version)."
-
-    def schema(self):
-        return {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}
-
-    def read_only(self):
-        return False
-
-    def __call__(self, ctx, args):
-        if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
-            return "Error: Permission denied by user."
-
-        path = Path(args["path"]).resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(args["content"], encoding="utf-8")
-        return f"Wrote to {path} (via Python)"
-
-
-class ShellWriteFileTool(SafeTool):
-    def name(self):
-        return "shell_write_file"
-
-    def description(self):
-        return "Write content to a file using Linux tools (printf)."
-
-    def schema(self):
-        return {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}
-
-    def read_only(self):
-        return False
-
-    def __call__(self, ctx, args):
-        if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
-            return "Error: Permission denied by user."
-
-        path = Path(args["path"]).resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Use printf to handle special characters safely
-        cmd = ["printf", "%s", args["content"]]
-        with open(path, "w", encoding="utf-8") as f:
-            subprocess.check_call(cmd, stdout=f)
-        return f"Wrote to {path} (via Linux printf)"
-
-
-def should_enable(tool_name: str, enabled_list: List[str]) -> bool:
-    return not enabled_list or tool_name in enabled_list
-
-
 def _deep_merge(base: dict, override: dict) -> dict:
     result = base.copy()
     for key, value in override.items():
@@ -393,6 +340,54 @@ class SafeTool(Tool, ABC):
 
     @abstractmethod
     def __call__(self, ctx: Any, args: dict) -> str: ...
+
+
+class WriteFileTool(SafeTool):
+    def name(self):
+        return "write_file"
+
+    def description(self):
+        return "Write content to a file. Overwrites if exists (Python version)."
+
+    def schema(self):
+        return {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}
+
+    def read_only(self):
+        return False
+
+    def __call__(self, ctx, args):
+        if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
+            return "Error: Permission denied by user."
+
+        path = Path(args["path"]).resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(args["content"], encoding="utf-8")
+        return f"Wrote to {path} (via Python)"
+
+
+class ShellWriteFileTool(SafeTool):
+    def name(self):
+        return "shell_write_file"
+
+    def description(self):
+        return "Write content to a file using Linux tools (printf)."
+
+    def schema(self):
+        return {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}
+
+    def read_only(self):
+        return False
+
+    def __call__(self, ctx, args):
+        if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
+            return "Error: Permission denied by user."
+
+        path = Path(args["path"]).resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = ["printf", "%s", args["content"]]
+        with open(path, "w", encoding="utf-8") as f:
+            subprocess.check_call(cmd, stdout=f)
+        return f"Wrote to {path} (via Linux printf)"
 
 
 class ReadFileTool(SafeTool):
@@ -571,15 +566,6 @@ class BashTool(SafeTool):
             except:
                 pass
         self.active_processes = []
-
-
-def _find_binary(name: str) -> str:
-    """Find the absolute path of an executable binary."""
-    for path in os.environ.get("PATH", "").split(os.pathsep):
-        full_path = Path(path) / name
-        if full_path.exists() and os.access(full_path, os.X_OK):
-            return str(full_path)
-    return ""
 
 
 class GrepTool(SafeTool):
@@ -915,6 +901,10 @@ class Registry:
 
 
 ALL_TOOLS = [ReadFileTool, ShellReadFileTool, WriteFileTool, ShellWriteFileTool, EditFileTool, ShellEditFileTool, MultiEditTool, BashTool, GrepTool, GlobTool, LsTool, WebFetchTool, AskTool, TodoWriteTool, WebSearchTool]
+
+
+def should_enable(tool_name: str, enabled_list: List[str]) -> bool:
+    return not enabled_list or tool_name in enabled_list
 
 
 def register_all_builtins(reg: Registry, cfg: Config, root: str, proxy=None) -> None:
