@@ -28,6 +28,7 @@ import os
 import socket
 
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+os.environ["LITELLM_DISABLE_PRICING"] = "True"
 import ipaddress
 import sys
 import json
@@ -427,7 +428,7 @@ class MultiEditTool(SafeTool):
         return False
 
     def __call__(self, ctx, args):
-        if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
+        if hasattr(ctx, "perm_manager") and (not ctx.perm_manager.check_and_request_permission(ctx, args["path"])):
             return "Error: Permission denied by user."
         path = Path(args["path"])
         content = path.read_text(encoding="utf-8")
@@ -755,15 +756,21 @@ class PermissionManager:
         self.granted_paths = set()
 
     def check_permission(self, file_path: str) -> bool:
-        path = str(Path(file_path).resolve())
-        return path in self.granted_paths
+        path = Path(file_path).resolve()
+        for granted in self.granted_paths:
+            granted_path = Path(granted).resolve()
+            if granted_path.is_dir() and (granted_path == path or granted_path in path.parents):
+                return True
+            if granted_path == path:
+                return True
+        return False
 
     def check_and_request_permission(self, controller, file_path: str) -> bool:
         if self.check_permission(file_path):
             return True
 
         path_obj = Path(file_path).resolve()
-        question = f"Need permission to access:\n  File: {path_obj}\nAllow this operation (and future ones in this session)?"
+        question = f"Need permission to access:\n  Path: {path_obj}\nAllow this operation (and future ones in this session for this file/folder)?"
         options = ["Yes", "No"]
 
         ask_tool = controller.registry.get("ask")
@@ -771,7 +778,8 @@ class PermissionManager:
             return False
 
         choice = ask_tool.execute(controller.context, {"question": question, "options": options})
-        if choice == "1":
+        logger.debug(f"Permission choice received: {choice}")
+        if choice.lower().strip() in ["1", "y", "yes", ""]:
             self.granted_paths.add(str(path_obj))
             return True
         return False
@@ -785,8 +793,6 @@ class PermissionManager:
 class Registry:
     def __init__(self):
         self._tools: Dict[str, Tool] = {}
-        # When True, writer tools are blocked (plan-mode gate).
-        # Mirrors Harness executor.SetPlanMode.
         self.plan_mode: bool = False
 
     def add(self, tool: Tool) -> None:
@@ -799,27 +805,20 @@ class Registry:
         return list(self._tools.values())
 
     def schemas(self) -> List[dict]:
-        """Return tool schemas. In plan mode, omit writer tools so the model
-        never sees them in its call list (mirrors Harness executor gate)."""
         if self.plan_mode:
             return [t.to_dict() for t in self._tools.values() if t.read_only()]
         return [t.to_dict() for t in self._tools.values()]
 
     def execute_gated(self, name: str, ctx: Any, args: dict) -> str:
-        """Execute a tool, enforcing the plan-mode gate for writers."""
         tool = self.get(name)
         if tool is None:
             return f"Error: tool '{name}' not found"
 
-        # Plan-mode gate: writers are blocked unless specifically granted
         if self.plan_mode and not tool.read_only():
-            # Check if this tool execution was already approved in plan mode
-            # We use context to store approved writes during plan mode
             approved_writes = getattr(ctx, "approved_writes", set())
             write_key = f"{name}:{args.get('path', 'unknown')}"
 
             if write_key not in approved_writes:
-                # Ask user for permission
                 question = f"Plan mode is ON. Tool '{name}' is a writer (target: {args.get('path', 'unknown')}).\n" f"Allow this write operation?"
                 options = ["Yes", "No (queue for later)"]
 
@@ -831,7 +830,6 @@ class Registry:
                         setattr(ctx, "approved_writes", approved_writes)
                         return tool.execute(ctx, args)
                     else:
-                        # Queue for later
                         pending = getattr(ctx, "pending_writes", [])
                         pending.append((tool, args))
                         setattr(ctx, "pending_writes", pending)
@@ -1383,7 +1381,7 @@ COMMANDS
   /model            List all available providers
   /model <name/idx> Switch to the specified provider
   /plan             Enable plan mode (next request is planned before execution)
-  /plan [on/off]    Enable or disable plan mode
+  /plan on/off    Enable or disable plan mode
   /plan status      Check current plan mode status
   /context          Display current context and LLM request payload
   /exit, /quit      Exit (automatically saves session)
@@ -1473,18 +1471,24 @@ def main(argv=None) -> None:
 
     def _cmd_plan(req):
         parts = req.split(None, 1)
-        sub = parts[1].strip().lower() if len(parts) > 1 else "on"
-        if sub in ("off", "disable", "false", "0"):
+        sub = parts[1].strip().lower() if len(parts) > 1 else None
+        if sub is None:
+            # Toggle mode
+            new_state = not ctrl.plan_mode
+            ctrl.set_plan_mode(new_state)
+            _stdout(f"Plan mode: {"ON" if new_state else "OFF"}")
+        elif sub in ("on", "enable", "true", "1"):
+            ctrl.set_plan_mode(True)
+            _stdout("Plan mode: ON — next request will be planned before execution.")
+            _stdout("  Writers are blocked until you approve the plan.")
+        elif sub in ("off", "disable", "false", "0"):
             ctrl.set_plan_mode(False)
             _stdout("Plan mode: OFF — writers unblocked.")
         elif sub in ("status",):
             state = "ON" if ctrl.plan_mode else "OFF"
             _stdout(f"Plan mode: {state}")
         else:
-            ctrl.set_plan_mode(True)
-            _stdout("Plan mode: ON — next request will be planned before execution.")
-            _stdout("  Writers are blocked until you approve the plan.")
-            _stdout("  Use /plan off to cancel without sending a request.")
+            _stdout(f"Unknown plan mode argument: {sub}. Use /plan [on/off/status]")
 
     # Exact-match commands
     COMMANDS = {
