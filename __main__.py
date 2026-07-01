@@ -39,6 +39,7 @@ import signal
 
 if sys.platform != "win32":
     import readline
+
 import urllib.request
 import yaml
 from loguru import logger
@@ -291,9 +292,53 @@ def log_box(category: str, text: str, max_width: int = 0) -> None:
     console.print(panel)
 
 
-# =============================================================================
-# 2. Built-in Tools (simplified, self-registering)
-# =============================================================================
+class WriteFileTool(SafeTool):
+    def name(self):
+        return "write_file"
+
+    def description(self):
+        return "Write content to a file. Overwrites if exists (Python version)."
+
+    def schema(self):
+        return {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}
+
+    def read_only(self):
+        return False
+
+    def __call__(self, ctx, args):
+        if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
+            return "Error: Permission denied by user."
+
+        path = Path(args["path"]).resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(args["content"], encoding="utf-8")
+        return f"Wrote to {path} (via Python)"
+
+
+class ShellWriteFileTool(SafeTool):
+    def name(self):
+        return "shell_write_file"
+
+    def description(self):
+        return "Write content to a file using Linux tools (printf)."
+
+    def schema(self):
+        return {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}
+
+    def read_only(self):
+        return False
+
+    def __call__(self, ctx, args):
+        if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
+            return "Error: Permission denied by user."
+
+        path = Path(args["path"]).resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Use printf to handle special characters safely
+        cmd = ["printf", "%s", args["content"]]
+        with open(path, "w", encoding="utf-8") as f:
+            subprocess.check_call(cmd, stdout=f)
+        return f"Wrote to {path} (via Linux printf)"
 
 
 def should_enable(tool_name: str, enabled_list: List[str]) -> bool:
@@ -355,7 +400,7 @@ class ReadFileTool(SafeTool):
         return "read_file"
 
     def description(self):
-        return "Read a file's contents, with optional line/char limits."
+        return "Read a file's contents (Python version)."
 
     def schema(self):
         return {"type": "object", "properties": {"path": {"type": "string"}, "start_line": {"type": "integer", "description": "Start line number (1-indexed)."}, "end_line": {"type": "integer", "description": "End line number (inclusive)."}, "max_chars": {"type": "integer", "description": "Maximum characters to read.", "default": 100000}}, "required": ["path", "start_line", "end_line"]}
@@ -364,7 +409,7 @@ class ReadFileTool(SafeTool):
         return True
 
     def __call__(self, ctx, args):
-        path = Path(args["path"])
+        path = Path(args["path"]).resolve()
         if not path.exists():
             return f"Error: File not found: {path}"
 
@@ -374,7 +419,6 @@ class ReadFileTool(SafeTool):
 
         content = []
         current_chars = 0
-
         with open(path, "r", encoding="utf-8") as f:
             for i, line in enumerate(f, 1):
                 if i >= start:
@@ -384,31 +428,26 @@ class ReadFileTool(SafeTool):
                     current_chars += len(line)
                     if current_chars >= max_chars:
                         break
-
         return "".join(content)
 
 
-class WriteFileTool(SafeTool):
+class ShellReadFileTool(SafeTool):
     def name(self):
-        return "write_file"
+        return "shell_read_file"
 
     def description(self):
-        return "Write content to a file. Overwrites if exists."
+        return "Read a file's contents using Linux tools (sed/head)."
 
     def schema(self):
-        return {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}
+        return {"type": "object", "properties": {"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}, "max_chars": {"type": "integer", "default": 100000}}, "required": ["path", "start_line", "end_line"]}
 
     def read_only(self):
-        return False
+        return True
 
     def __call__(self, ctx, args):
-        if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
-            return "Error: Permission denied by user."
-
-        path = Path(args["path"])
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(args["content"], encoding="utf-8")
-        return f"Wrote {path} ({len(args['content'])} chars)"
+        path = Path(args["path"]).resolve()
+        cmd = f"sed -n '{args['start_line']},{args['end_line']}p' '{path}' | head -c {args.get('max_chars', 100000)}"
+        return subprocess.check_output(cmd, shell=True, text=True)
 
 
 class EditFileTool(SafeTool):
@@ -416,7 +455,7 @@ class EditFileTool(SafeTool):
         return "edit_file"
 
     def description(self):
-        return "Edit a file with search/replace."
+        return "Edit a file with search/replace (Python version)."
 
     def schema(self):
         return {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}
@@ -427,13 +466,37 @@ class EditFileTool(SafeTool):
     def __call__(self, ctx, args):
         if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
             return "Error: Permission denied by user."
-        path = Path(args["path"])
+
+        path = Path(args["path"]).resolve()
         content = path.read_text(encoding="utf-8")
-        old = args["old_text"]
-        if old not in content:
+        if args["old_text"] not in content:
             return f"Error: old_text not found in {path}"
-        path.write_text(content.replace(old, args["new_text"], 1), encoding="utf-8")
-        return f"Edited {path}"
+        path.write_text(content.replace(args["old_text"], args["new_text"], 1), encoding="utf-8")
+        return f"Edited {path} (via Python)"
+
+
+class ShellEditFileTool(SafeTool):
+    def name(self):
+        return "shell_edit_file"
+
+    def description(self):
+        return "Edit a file with search/replace using Linux tools (perl)."
+
+    def schema(self):
+        return {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}
+
+    def read_only(self):
+        return False
+
+    def __call__(self, ctx, args):
+        if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
+            return "Error: Permission denied by user."
+
+        path = Path(args["path"]).resolve()
+        env = {"OLD_TEXT": args["old_text"], "NEW_TEXT": args["new_text"]}
+        cmd = r"perl -i -pe 'BEGIN{undef $/;} s/\Q$ENV{OLD_TEXT}\E/$ENV{NEW_TEXT}/' " + f"'{path}'"
+        subprocess.check_call(cmd, shell=True, env=env)
+        return f"Edited {path} (via Perl)"
 
 
 class MultiEditTool(SafeTool):
@@ -450,17 +513,14 @@ class MultiEditTool(SafeTool):
         return False
 
     def __call__(self, ctx, args):
-        if hasattr(ctx, "perm_manager") and (not ctx.perm_manager.check_and_request_permission(ctx, args["path"])):
-            return "Error: Permission denied by user."
-        path = Path(args["path"])
-        content = path.read_text(encoding="utf-8")
+        edit_tool = EditFileTool()
+        results = []
         for edit in args["edits"]:
-            old = edit["old_text"]
-            if old not in content:
-                return f"Error: old_text not found: {old[:50]}..."
-            content = content.replace(old, edit["new_text"], 1)
-        path.write_text(content, encoding="utf-8")
-        return f"Applied {len(args['edits'])} edits to {path}"
+            res = edit_tool(ctx, {"path": args["path"], "old_text": edit["old_text"], "new_text": edit["new_text"]})
+            results.append(res)
+            if res.startswith("Error"):
+                return f"Multi-edit failed: {res}"
+        return f"Applied {len(args['edits'])} edits to {args['path']}"
 
 
 class BashTool(SafeTool):
@@ -669,8 +729,9 @@ class AskTool(SafeTool):
         except Exception as e:
             logger.exception(f"Tool {self.name()} execution failed")
             return f"Error: Tool execution failed - {str(e)}"
-            return "Cancelled"
-            return "<model-assumption> Proceeding with default."
+
+    def __call__(self, ctx, args):
+        return self.execute(ctx, args)
 
 
 class TodoWriteTool(SafeTool):
@@ -690,7 +751,6 @@ class TodoWriteTool(SafeTool):
         target = ctx.context if hasattr(ctx, "context") else ctx
         if hasattr(target, "todos"):
             target.todos = args["todos"]
-            # Visual feedback for task progress in terminal
             todo_display = "\n".join([f"  [{t['status']:<11}] {t['content']}" for t in args["todos"]])
             _stdout(f"\n\U0001f4dd TASK PROGRESS:\n{todo_display}\n")
         return f"Updated {len(args['todos'])} todos"
@@ -854,7 +914,7 @@ class Registry:
         return tool.execute(ctx, args)
 
 
-ALL_TOOLS = [ReadFileTool, WriteFileTool, EditFileTool, MultiEditTool, BashTool, GrepTool, GlobTool, LsTool, WebFetchTool, AskTool, TodoWriteTool, WebSearchTool]
+ALL_TOOLS = [ReadFileTool, ShellReadFileTool, WriteFileTool, ShellWriteFileTool, EditFileTool, ShellEditFileTool, MultiEditTool, BashTool, GrepTool, GlobTool, LsTool, WebFetchTool, AskTool, TodoWriteTool, WebSearchTool]
 
 
 def register_all_builtins(reg: Registry, cfg: Config, root: str, proxy=None) -> None:
@@ -863,6 +923,10 @@ def register_all_builtins(reg: Registry, cfg: Config, root: str, proxy=None) -> 
         name = cls().name()
         if not should_enable(name, enabled):
             continue
+
+        if sys.platform == "win32" and name in ["shell_read_file", "shell_edit_file", "shell_write_file"]:
+            continue
+
         if cls is BashTool:
             reg.add(cls(prefer=cfg.tools.shell.prefer, path=cfg.tools.shell.path, timeout=cfg.tools.bash_timeout_seconds))
         elif cls is WebFetchTool:
