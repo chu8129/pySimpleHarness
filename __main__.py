@@ -535,6 +535,11 @@ class BashTool(SafeTool):
         return False
 
     def __call__(self, ctx, args):
+        logger.warning(f"BASH EXECUTION REQUESTED:\nCommand: {args['command']}")
+        confirm = input("Confirm execution? (y/yes): ").strip().lower()
+        if confirm not in ["y", "yes"]:
+            return "Execution denied by user."
+
         proc = subprocess.Popen(args["command"], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", executable=self.path or None)
         self.active_processes.append(proc)
         try:
@@ -1457,21 +1462,34 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description="Harness Kernel (Python)")
     parser.add_argument("--root", default=".", help="Workspace root")
     parser.add_argument("--model", default="", help="Override default model")
-    parser.add_argument("--resume", default="", help="Resume session ID")
+    parser.add_argument("--resume", nargs="?", const="AUTO_RESUME", default=None, help="Resume session ID")
     parser.add_argument("request", nargs="?", help="User request to execute")
     args = parser.parse_args(argv)
     ctrl = Controller(workspace_root=args.root)
 
-    if args.resume:
-        if ctrl.load_session(args.resume):
+    sid_to_load = None
+    if args.resume == "AUTO_RESUME":
+        sessions_dir = ctrl._sessions_dir()
+        files = list(sessions_dir.glob("*.json"))
+        if files:
+            latest_file = max(files, key=os.path.getmtime)
+            sid_to_load = latest_file.stem
+            logger.info(f"Auto-resuming latest session: {sid_to_load}")
+        else:
+            logger.warning("No sessions found to auto-resume.")
+    elif args.resume:
+        sid_to_load = args.resume
+
+    if sid_to_load:
+        if ctrl.load_session(sid_to_load):
             register_all_builtins(ctrl.registry, ctrl.cfg, ctrl.root)
             if not ctrl.cfg.providers:
                 raise RuntimeError("No providers configured. Add at least one provider to config.yaml.")
             default = next((p for p in ctrl.cfg.providers if p.default), ctrl.cfg.providers[0])
             ctrl.provider = Provider(default)
-            log_box("boot", f"Resumed session: {args.resume}\nWorkspace: {ctrl.root}\nMessages: {len(ctrl.context.messages)}")
+            log_box("boot", f"Resumed session: {sid_to_load}\nWorkspace: {ctrl.root}\nMessages: {len(ctrl.context.messages)}")
         else:
-            _stdout(f"Session '{args.resume}' not found. Starting fresh.")
+            logger.info(f"Session '{sid_to_load}' not found. Starting fresh.")
             ctrl.boot()
     else:
         ctrl.boot()
