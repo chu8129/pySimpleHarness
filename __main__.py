@@ -273,7 +273,7 @@ def log_box(category: str, text: str, max_width: int = 0) -> None:
     style = _LOG_STYLES.get(category, (category.upper(), "│"))
     label, _ = style
 
-    # 格式化列表内容：将长字符串（如 Tools/Skills 列表）转换为换行显示
+    # Format list content: convert long strings (e.g. Tools/Skills lists) to newline display
     if category == "boot":
         formatted_text = text.replace("],", "],\n").replace(", ", "\n  ")
     else:
@@ -381,6 +381,7 @@ class WriteFileTool(SafeTool):
     def __call__(self, ctx, args):
         if hasattr(ctx, "perm_manager") and not ctx.perm_manager.check_and_request_permission(ctx, args["path"]):
             return "Error: Permission denied by user."
+
         path = Path(args["path"])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(args["content"], encoding="utf-8")
@@ -675,9 +676,6 @@ class WebSearchTool(SafeTool):
 
     def __call__(self, ctx, args):
         import requests
-
-    def __call__(self, ctx, args):
-        import requests
         from bs4 import BeautifulSoup
 
         query, engine = args["query"], args.get("engine", "duckduckgo")
@@ -711,35 +709,36 @@ class WebSearchTool(SafeTool):
 
 
 def parse_plan_todos(plan: str) -> List[dict]:
-    """Extract a starter task list from an approved plan's markdown list items.
+    """Extract a starter task list from an approved plan using robust regex.
 
-    Mirrors DeepSeek-Harness parsePlanTodos (internal/control/controller.go).
-    First item gets status='in_progress'; the rest 'pending'. Capped at 20.
+    Matches various Markdown list styles:
+    - "1. Task"
+    - "- Task"
+    - "* Task"
+    - "+ Task"
+    Ignores indentation for base-level extraction, handles Markdown bold/code.
     """
     import re
 
     todos: List[dict] = []
-    for raw in plan.splitlines():
-        stripped = raw.lstrip(" \t")
-        if not stripped:
-            continue
-        content: Optional[str] = None
-        level = 0
-        indent = len(raw) - len(stripped)
-        m = re.match(r"^(\d+)[.)]\s+(.*)", stripped)
-        if m:
-            content = m.group(2).strip()
-            level = 1 if indent >= 2 else 0
-        elif re.match(r"^[-*+]\s", stripped):
-            content = stripped[2:].strip()
-            level = 1 if indent >= 2 else 0
-        if content:
-            content = content.replace("`", "").replace("**", "").strip()
-            if content:
-                status = "in_progress" if len(todos) == 0 else "pending"
-                todos.append({"id": str(len(todos) + 1), "content": content, "status": status, "level": level})
-                if len(todos) >= 20:
-                    break
+    # Regex explanation:
+    # ^\s*                : Allow leading spaces
+    # (?:-|\*|\+|\d+\.)   : Match list marker (- or * or + or 1.)
+    # \s+                 : Match whitespace after marker
+    # (.*?)               : Non-greedy match content
+    # (?:\n|$)            : End at newline or EOF
+    pattern = re.compile(r"^\s*(?:-|\*|\+|\d+\.)\s+(.+)$", re.MULTILINE)
+
+    for match in pattern.finditer(plan):
+        content = match.group(1).strip()
+        # Clear Markdown modifiers for clean output
+        clean_content = re.sub(r"[`*~_]+", "", content).strip()
+        if clean_content:
+            status = "in_progress" if len(todos) == 0 else "pending"
+            todos.append({"id": str(len(todos) + 1), "content": clean_content, "status": status, "level": 0})  # Simplified to flat structure
+        if len(todos) >= 20:
+            break
+
     return todos
 
 
@@ -751,57 +750,29 @@ def parse_plan_todos(plan: str) -> List[dict]:
 class PermissionManager:
     """Manages file-level write permissions with interactive approval."""
 
-    def __init__(self, storage_file: str = ".permissions.json"):
-        self.storage_file = Path(storage_file)
-        self.data = self._load()
+    def __init__(self):
+        # Memory-only cache for the current session
+        self.granted_paths = set()
 
-    def _load(self) -> dict:
-        if self.storage_file.exists():
-            with open(self.storage_file, "r") as f:
-                return json.load(f)
-        return {"granted": {}}
-
-    def _save(self) -> None:
-        with open(self.storage_file, "w") as f:
-            json.dump(self.data, f, indent=2)
-
-    def check_permission(self, file_path: str) -> Optional[str]:
-        path = Path(file_path).resolve()
-        if str(path) in self.data["granted"]:
-            return self.data["granted"][str(path)]
-        for parent in path.parents:
-            if str(parent) in self.data["granted"]:
-                return self.data["granted"][str(parent)]
-        return None
-
-    def grant(self, path: str, scope: str) -> None:
-        resolved = Path(path).resolve()
-        if scope == "dir":
-            p = resolved if resolved.is_dir() else resolved.parent
-            self.data["granted"][str(p)] = "all_in_dir"
-        else:
-            self.data["granted"][str(resolved)] = "file"
-        self._save()
+    def check_permission(self, file_path: str) -> bool:
+        path = str(Path(file_path).resolve())
+        return path in self.granted_paths
 
     def check_and_request_permission(self, controller, file_path: str) -> bool:
         if self.check_permission(file_path):
             return True
+
         path_obj = Path(file_path).resolve()
-        question = f"Need permission to access:\n" f"  File: {path_obj}\n" f"  Directory: {path_obj.parent}\n" f"What's your decision?"
-        options = [
-            f"Grant file access ({path_obj.name})",
-            f"Grant directory access ({path_obj.parent.name})",
-            "Deny",
-        ]
+        question = f"Need permission to access:\n  File: {path_obj}\nAllow this operation (and future ones in this session)?"
+        options = ["Yes", "No"]
+
         ask_tool = controller.registry.get("ask")
         if not ask_tool:
             return False
+
         choice = ask_tool.execute(controller.context, {"question": question, "options": options})
         if choice == "1":
-            self.grant(file_path, "file")
-            return True
-        elif choice == "2":
-            self.grant(file_path, "dir")
+            self.granted_paths.add(str(path_obj))
             return True
         return False
 
@@ -1080,7 +1051,6 @@ class Controller:
         self.cfg = Config.load_for_root(self.root)
         self.registry = Registry()
         self.perm_manager = PermissionManager()
-        self.provider: Optional[Provider] = None
         self.context: Optional[Context] = None
         self.step_count = 0
         # Plan-mode state: when True, PlanModeMarker is prepended to outgoing
